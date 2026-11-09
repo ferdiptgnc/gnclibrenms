@@ -32,6 +32,8 @@ Setelah selesai, buka `http://IP-PC` (atau `http://IP-PC:PORT` kalau port bukan 
 | Hostname | `librenms` | |
 | Konfigurasi IP | biarkan | atau IP statis: interface, IP/CIDR, gateway, DNS (`8.8.8.8 1.1.1.1`) |
 | Port Web | `80` | dicek bentrok dengan aplikasi lain |
+| Domain publik | *(kosong)* | isi bila diakses via Cloudflare Tunnel / reverse proxy, mis. `https://nms.klien.com` |
+| Trusted proxy | `127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16` | IP/CIDR reverse proxy yang dipercaya; persempit ke IP cloudflared bila diketahui |
 | Zona waktu | `Asia/Jakarta` | pilihan WIB/WITA/WIT/UTC atau ketik manual |
 | Username admin | `admin` | |
 | Password admin | *(kosong = generate acak)* | minimal 8 karakter |
@@ -71,6 +73,15 @@ docker compose pull && docker compose up -d     # update LibreNMS
 docker exec --user librenms librenms php validate.php
 docker exec -it --user librenms librenms lnms user:password admin   # reset password
 ```
+
+## Akses lewat Cloudflare Tunnel
+
+Kalau domain publik diisi, installer akan:
+- Mengisi `APP_TRUSTED_PROXIES` di env container dan di `.env` LibreNMS. Sejak LibreNMS 26.5, header `X-Forwarded-*` tidak lagi dipercaya secara default. Tanpa setting ini, halaman HTTPS memuat URL `http://` dan browser memblokirnya dengan error *Mixed Content*, sehingga tabel device kosong.
+- Mengisi `base_url`/`LIBRENMS_BASE_URL` dengan domain tersebut, supaya link di email alert benar.
+- Mensimulasikan request dari Cloudflare untuk memastikan tidak ada URL `http://` yang tersisa.
+
+Di dashboard Cloudflare Tunnel, arahkan *service* untuk hostname-nya ke `http://IP-PC:80`, bukan `https://`.
 
 ## Catatan
 
