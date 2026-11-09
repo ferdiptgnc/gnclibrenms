@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-#  Galura Nexa Core — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
+#  install-librenms.sh — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
 # ============================================================================
-#  Versi  : 1.0.4
+#  Versi  : 1.0.5
 #  Target : PC/VM dengan Debian 13 yang baru diinstall (minimal / netinst)
 #
 #  Cara pakai (sebagai root):
@@ -21,7 +21,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.0.4"
+readonly SCRIPT_VERSION="1.0.5"
 readonly LOG_FILE="/var/log/librenms-install.log"
 readonly BACKTITLE="LibreNMS Docker Installer v${SCRIPT_VERSION}  |  Debian 13"
 
@@ -38,6 +38,8 @@ set_defaults() {
   : "${LNMS_GATEWAY:=}"
   : "${LNMS_DNS:=8.8.8.8 1.1.1.1}"
   : "${LNMS_HTTP_PORT:=80}"
+  : "${LNMS_PUBLIC_URL:=}"               # mis. https://nms.klien.com (Cloudflare Tunnel/reverse proxy)
+  : "${LNMS_TRUSTED_PROXIES:=127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}"
   : "${LNMS_TZ:=Asia/Jakarta}"
   : "${LNMS_ADMIN_USER:=admin}"
   : "${LNMS_ADMIN_PASS:=}"               # kosong = di-generate otomatis
@@ -190,6 +192,15 @@ valid_db_pass() { [[ $1 =~ ^[A-Za-z0-9._-]{8,64}$ ]]; }
 valid_iface() { [[ -n $1 && -d /sys/class/net/$1 ]]; }
 valid_memory() { [[ $1 =~ ^[0-9]+[MG]$ ]]; }
 valid_nonempty() { [[ -n $1 ]]; }
+valid_public_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?$ ]]; }
+valid_proxy_list() {
+  local p; [[ $1 == "*" || $1 == "**" ]] && return 0
+  [[ -n $1 ]] || return 1
+  for p in ${1//,/ }; do
+    valid_ipv4 "${p%/*}" || return 1
+    [[ $p != */* ]] || { local pf=${p#*/}; [[ $pf =~ ^[0-9]{1,2}$ ]] && ((pf <= 32)) || return 1; }
+  done
+}
 
 port_in_use() { # port_in_use <port> [tcp|udp]
   local proto=${2:-tcp} flag=-t
@@ -429,6 +440,17 @@ Tekan ESC/Cancel di dialog mana pun untuk membatalkan." 22
     else break; fi
   done
 
+  # --- Akses publik (Cloudflare Tunnel / reverse proxy) ---
+  ask_input LNMS_PUBLIC_URL "Domain Publik (opsional)" \
+    "URL publik bila LibreNMS diakses lewat Cloudflare Tunnel / reverse proxy.\nContoh: https://nms.klien.com\n\nKosongkan bila hanya diakses lewat IP lokal." \
+    "$LNMS_PUBLIC_URL" valid_public_url "Format salah. Contoh: https://nms.klien.com (tanpa path)"
+  LNMS_PUBLIC_URL=${LNMS_PUBLIC_URL%/}
+  if [[ -n $LNMS_PUBLIC_URL ]]; then
+    ask_input LNMS_TRUSTED_PROXIES "Trusted Proxy" \
+      "IP/CIDR reverse proxy yang dipercaya (pisahkan koma).\nDefault mencakup cloudflared di PC ini (Docker) & jaringan LAN privat.\nPersempit ke IP cloudflared bila diketahui, mis. 192.168.1.10" \
+      "$LNMS_TRUSTED_PROXIES" valid_proxy_list "Isi IPv4/CIDR dipisah koma, contoh: 127.0.0.1,172.16.0.0/12"
+  fi
+
   # --- Timezone ---
   choice=$(whiptail --backtitle "$BACKTITLE" --title "Zona Waktu" --default-item "$LNMS_TZ" --menu \
     "Pilih zona waktu server:" 15 "$WT_W" 5 \
@@ -516,6 +538,9 @@ collect_unattended() {
   [[ -z $LNMS_DB_PASS ]] || valid_db_pass "$LNMS_DB_PASS" || die "LNMS_DB_PASS hanya huruf/angka/._- (8-64)."
   valid_community "$LNMS_SNMP_COMMUNITY" || die "LNMS_SNMP_COMMUNITY tidak valid."
   valid_memory "$LNMS_MEMORY_LIMIT"     || die "LNMS_MEMORY_LIMIT tidak valid (contoh 256M)."
+  valid_public_url "$LNMS_PUBLIC_URL"   || die "LNMS_PUBLIC_URL tidak valid (contoh https://nms.klien.com)."
+  LNMS_PUBLIC_URL=${LNMS_PUBLIC_URL%/}
+  valid_proxy_list "$LNMS_TRUSTED_PROXIES" || die "LNMS_TRUSTED_PROXIES tidak valid (IPv4/CIDR dipisah koma)."
   case $LNMS_NET_MODE in
     keep) ;;
     static)
@@ -580,6 +605,7 @@ confirm_config() {
   summary="Hostname       : $LNMS_HOSTNAME
   Jaringan       : $net_txt
   URL Web UI     : $WEB_URL
+  URL publik     : ${LNMS_PUBLIC_URL:-tidak ada}
   Zona waktu     : $LNMS_TZ
   Admin          : $LNMS_ADMIN_USER ($LNMS_ADMIN_EMAIL)
   Password admin : $( [[ $ADMIN_PASS_GENERATED == yes ]] && echo 'di-generate otomatis (ditampilkan di akhir)' || echo '******** (sesuai input)')
@@ -707,7 +733,12 @@ SESSION_DRIVER=redis
 REDIS_HOST=redis
 
 LIBRENMS_WEATHERMAP=false
+
+# Reverse proxy (Cloudflare Tunnel dll). LibreNMS >= 26.5 tidak lagi mempercayai
+# header X-Forwarded-* secara default -> tanpa ini muncul error "Mixed Content".
+APP_TRUSTED_PROXIES=${LNMS_TRUSTED_PROXIES}
 EOF
+  [[ -n $LNMS_PUBLIC_URL ]] && echo "LIBRENMS_BASE_URL=${LNMS_PUBLIC_URL}/" >>"$d/librenms.env"
 
   depends="      - db
       - redis"
@@ -885,15 +916,26 @@ start_stack() {
   ok "Container inti berjalan"
 }
 
-# Wizard web (/install) tetap muncul selama .env di volume data masih punya baris INSTALL=.
-# Admin sudah dibuat via CLI, jadi penanda itu dihapus agar Web UI langsung ke halaman login.
+# Menyiapkan .env LibreNMS di volume data:
+#  - hapus penanda INSTALL= (admin sudah dibuat via CLI) agar wizard /install tidak muncul
+#  - pastikan APP_TRUSTED_PROXIES ada, apa pun versi image Docker-nya
 finalize_install() {
-  local envf=$LNMS_INSTALL_DIR/librenms/.env cf=$LNMS_INSTALL_DIR/compose.yml loc
-  if [[ -f $envf ]] && grep -q '^INSTALL=' "$envf"; then
-    log "Menandai instalasi selesai (melewati wizard web)..."
+  local envf=$LNMS_INSTALL_DIR/librenms/.env cf=$LNMS_INSTALL_DIR/compose.yml loc changed=no
+  if [[ -f $envf ]]; then
     cp -p "$envf" "$envf.bak"
-    sed -i '/^INSTALL=/d' "$envf"
+    if [[ ${ADMIN_FAILED:-no} != yes ]] && grep -q '^INSTALL=' "$envf"; then
+      sed -i '/^INSTALL=/d' "$envf"; changed=yes
+    fi
+    if ! grep -qxF "APP_TRUSTED_PROXIES=${LNMS_TRUSTED_PROXIES}" "$envf"; then
+      sed -i '/^APP_TRUSTED_PROXIES=/d' "$envf"
+      echo "APP_TRUSTED_PROXIES=${LNMS_TRUSTED_PROXIES}" >>"$envf"; changed=yes
+    fi
     chown --reference="$envf.bak" "$envf"; chmod --reference="$envf.bak" "$envf"
+  else
+    warn "File $envf belum ada, lewati penyesuaian .env"
+  fi
+  if [[ $changed == yes ]]; then
+    log "Menerapkan konfigurasi .env (wizard dilewati, trusted proxy diset)..."
     run "${COMPOSE[@]}" -f "$cf" restart librenms
     wait_ready
   fi
@@ -903,6 +945,19 @@ finalize_install() {
     WIZARD_PENDING=yes
   else
     ok "Web UI siap login tanpa wizard"
+  fi
+  check_proxy_https
+}
+
+# Simulasikan request dari Cloudflare: halaman harus memakai https, bukan http
+check_proxy_https() {
+  [[ -n $LNMS_PUBLIC_URL ]] || return 0
+  local host=${LNMS_PUBLIC_URL#*://}; host=${host%%/*}
+  if curl -s -m 10 -H "Host: $host" -H "X-Forwarded-Proto: https" -H "X-Forwarded-Host: $host" \
+       "http://127.0.0.1:${LNMS_HTTP_PORT}/login" 2>/dev/null | grep -q "http://${host}"; then
+    warn "Halaman masih memuat URL http:// untuk $host — cek APP_TRUSTED_PROXIES."
+  else
+    ok "Akses via $LNMS_PUBLIC_URL siap (tanpa Mixed Content)"
   fi
 }
 
@@ -945,6 +1000,10 @@ create_admin() {
 }
 
 configure_librenms() {
+  if [[ -n $LNMS_PUBLIC_URL ]]; then
+    if lnms config:set base_url "${LNMS_PUBLIC_URL}/" >>"$LOG_FILE" 2>&1; then ok "base_url diset ke ${LNMS_PUBLIC_URL}/"
+    else warn "Gagal set base_url: lnms config:set base_url ${LNMS_PUBLIC_URL}/"; fi
+  fi
   log "Set SNMP community default: $LNMS_SNMP_COMMUNITY"
   if lnms config:set snmp.community "[\"${LNMS_SNMP_COMMUNITY}\"]" >>"$LOG_FILE" 2>&1; then
     ok "SNMP community default diset"
@@ -1014,6 +1073,8 @@ write_info_file() {
     echo "Installer        : install-librenms.sh v${SCRIPT_VERSION}"
     echo "Hostname         : $LNMS_HOSTNAME"
     echo "URL Web UI       : $WEB_URL"
+    [[ -n $LNMS_PUBLIC_URL ]] && echo "URL publik       : $LNMS_PUBLIC_URL"
+    echo "Trusted proxies  : $LNMS_TRUSTED_PROXIES"
     echo "Admin username   : $LNMS_ADMIN_USER"
     if [[ $ADMIN_PASS_GENERATED == yes ]]; then
       echo "Admin password   : $LNMS_ADMIN_PASS   (di-generate, segera ganti setelah login)"
@@ -1133,6 +1194,7 @@ show_summary() {
   printf '%s%s  LibreNMS berhasil diinstall!%s\n' "$C_GRN" "$C_BLD" "$C_RST"
   printf '%s%s============================================================%s\n' "$C_GRN" "$C_BLD" "$C_RST"
   printf '  URL Web UI     : %s%s%s\n' "$C_BLD" "$WEB_URL" "$C_RST"
+  [[ -n $LNMS_PUBLIC_URL ]] && printf '  URL publik     : %s%s%s\n' "$C_BLD" "$LNMS_PUBLIC_URL" "$C_RST"
   printf '  Username       : %s\n' "$LNMS_ADMIN_USER"
   printf '  Password       : %s\n' "$pass_line"
   [[ ${ADMIN_FAILED:-no} == yes ]] && printf '  %sUser admin GAGAL dibuat otomatis — lihat peringatan di atas.%s\n' "$C_RED" "$C_RST"
@@ -1174,7 +1236,7 @@ main() {
   start_stack
   wait_ready
   create_admin
-  [[ ${ADMIN_FAILED:-no} == yes ]] || finalize_install
+  finalize_install
   start_workers
   configure_librenms
   setup_self_monitoring
