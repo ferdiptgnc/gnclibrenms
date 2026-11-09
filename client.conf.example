@@ -1,0 +1,39 @@
+# Contoh config untuk: bash install-librenms.sh --unattended --config client-a.conf
+# Hapus/komentari baris yang ingin memakai default.
+
+LNMS_HOSTNAME="librenms-client-a"
+LNMS_TZ="Asia/Jakarta"
+LNMS_HTTP_PORT="80"
+
+# --- Jaringan: "keep" (tidak diubah) atau "static" ---
+LNMS_NET_MODE="static"
+LNMS_IFACE=""                      # kosong = interface default route
+LNMS_IP_CIDR="192.168.10.20/24"
+LNMS_GATEWAY="192.168.10.1"
+LNMS_DNS="8.8.8.8 1.1.1.1"
+LNMS_AUTO_REBOOT="yes"             # perlu reboot bila memakai ifupdown (default Debian)
+
+# --- Akun admin LibreNMS ---
+LNMS_ADMIN_USER="admin"
+LNMS_ADMIN_PASS=""                 # kosong = generate acak, lihat INSTALL-INFO.txt
+LNMS_ADMIN_EMAIL="noc@klien-a.co.id"
+
+# --- SNMP & komponen ---
+LNMS_SNMP_COMMUNITY="ganti-community-ini"
+LNMS_ENABLE_SYSLOG="yes"
+LNMS_ENABLE_TRAP="yes"
+LNMS_MONITOR_SELF="yes"
+LNMS_LOCATION="Kantor Klien A"
+
+# --- Email alert (opsional) ---
+LNMS_ENABLE_SMTP="no"
+LNMS_SMTP_HOST="smtp.gmail.com"
+LNMS_SMTP_PORT="587"
+LNMS_SMTP_USER=""
+LNMS_SMTP_PASS=""
+LNMS_SMTP_FROM=""
+
+# --- Lanjutan ---
+LNMS_INSTALL_DIR="/opt/librenms"
+LNMS_MEMORY_LIMIT="256M"
+LNMS_LIBRENMS_TAG="latest"         # pin versi (mis. 26.10.2) agar 100 PC seragam
