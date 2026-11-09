@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # ============================================================================
-#  install-librenms.sh — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
+#  Galura Nexa Core — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
 # ============================================================================
-#  Versi  : 1.0.2
+#  Versi  : 1.0.4
 #  Target : PC/VM dengan Debian 13 yang baru diinstall (minimal / netinst)
 #
 #  Cara pakai (sebagai root):
@@ -21,7 +21,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.0.4"
 readonly LOG_FILE="/var/log/librenms-install.log"
 readonly BACKTITLE="LibreNMS Docker Installer v${SCRIPT_VERSION}  |  Debian 13"
 
@@ -60,6 +60,8 @@ set_defaults() {
   : "${LNMS_REDIS_TAG:=7.2-alpine}"
   : "${LNMS_AUTO_REBOOT:=yes}"           # reboot otomatis bila IP statis butuh reboot
   : "${LNMS_FORCE_OS:=0}"                # 1 = tetap jalan walau bukan Debian 13
+  : "${LNMS_BRAND_TAGLINE:=}"            # teks tambahan di bawah logo (opsional)
+  : "${LNMS_NO_BANNER:=no}"              # yes = sembunyikan logo
 }
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,61 @@ trim() {
 
 gen_pass() { # gen_pass <panjang>
   head -c 2048 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"${1:-20}"
+}
+
+# ---------------------------------------------------------------------------
+# Banner logo GNC (Galura Nexa Core) — terminal art 256 warna
+# ---------------------------------------------------------------------------
+GNC_ICON=(
+  $'         \e[1;38;5;33m█▀▀▀█\e[0m        \e[1;38;5;137m█▀▀▀█\e[0m        \e[1;38;5;33m█▀▀▀█\e[0m'
+  $'         \e[1;38;5;33m█\e[0m   \e[1;38;5;33m█\e[0m        \e[1;38;5;137m█\e[0m   \e[1;38;5;137m█\e[0m        \e[1;38;5;33m█\e[0m   \e[1;38;5;33m█\e[0m'
+  $'         \e[1;38;5;33m▀▀▀▀▀▄\e[0m       \e[1;38;5;137m▀▀\e[0m\e[1;38;5;137m\e[48;5;33m▀\e[0m\e[1;38;5;137m▀▀\e[0m       \e[1;38;5;33m▄▀▀▀▀▀\e[0m'
+  $'               \e[1;38;5;33m▀▄\e[0m       \e[1;38;5;33m█\e[0m       \e[1;38;5;33m▄▀\e[0m'
+  $'                 \e[1;38;5;33m▀▄▄▄▄▄▄█▄▄▄▄▄▄▀\e[0m'
+  $'                  \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m'
+  $'                  \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m    \e[1;38;5;137m▄▄▄▄▄\e[0m'
+  $'           \e[1;38;5;33m▄▄▄▄▄▄▄█▄▄▄▄▄█▄▄▄▄▄█▄▄▄▄\e[0m\e[1;38;5;137m█\e[0m   \e[1;38;5;137m█\e[0m'
+  $'           \e[1;38;5;33m█\e[0m      \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m    \e[1;38;5;137m█▄▄▄█\e[0m'
+  $'           \e[1;38;5;33m█\e[0m      \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m'
+  $'           \e[1;38;5;33m█\e[0m      \e[1;38;5;33m█▄▄▄▄▄█▄▄▄▄▄█\e[0m'
+  $'           \e[1;38;5;33m█\e[0m            \e[1;38;5;33m█\e[0m      \e[1;38;5;33m▀▄\e[0m'
+  $'         \e[1;38;5;137m▄▄\e[0m\e[1;38;5;33m\e[48;5;137m▀\e[0m\e[1;38;5;137m▄▄\e[0m         \e[1;38;5;33m▄█▄\e[0m       \e[1;38;5;33m▀▄▄▄▄▄▄\e[0m'
+  $'         \e[1;38;5;137m█\e[0m   \e[1;38;5;137m█\e[0m        \e[1;38;5;33m█\e[0m   \e[1;38;5;33m█\e[0m        \e[1;38;5;33m█\e[0m   \e[1;38;5;33m█\e[0m'
+  $'         \e[1;38;5;137m█▄▄▄█\e[0m        \e[1;38;5;33m▀▄▄▄▀\e[0m        \e[1;38;5;33m█▄▄▄█\e[0m'
+)
+GNC_TEXT=(
+  $'  \e[1;38;5;33m██████\e[0m   \e[1;38;5;33m█████\e[0m  \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██████\e[0m   \e[1;38;5;33m█████\e[0m'
+  $' \e[1;38;5;33m██\e[0m       \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m'
+  $' \e[1;38;5;33m██\e[0m   \e[1;38;5;33m███\e[0m \e[1;38;5;33m███████\e[0m \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██████\e[0m  \e[1;38;5;33m███████\e[0m'
+  $' \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m'
+  $'  \e[1;38;5;33m██████\e[0m  \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m███████\e[0m  \e[1;38;5;33m██████\e[0m  \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m'
+  $''
+  $'\e[1;38;5;33m█▄\e[0m  \e[1;38;5;33m█\e[0m \e[1;38;5;33m█▀▀▀\e[0m \e[1;38;5;33m▀▄\e[0m \e[1;38;5;33m▄▀\e[0m \e[1;38;5;33m▄▀▀▀▄\e[0m      \e[1;38;5;33m▄▀▀▀▀\e[0m \e[1;38;5;33m▄▀▀▀▄\e[0m \e[1;38;5;33m█▀▀▀▄\e[0m \e[1;38;5;33m█▀▀▀\e[0m'
+  $'\e[1;38;5;33m█\e[0m \e[1;38;5;33m▀▄█\e[0m \e[1;38;5;33m█▀▀\e[0m   \e[1;38;5;33m▄▀▄\e[0m  \e[1;38;5;33m█▀▀▀█\e[0m      \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m   \e[1;38;5;33m█\e[0m \e[1;38;5;33m█▀▀█\e[0m  \e[1;38;5;33m█▀▀\e[0m'
+  $'\e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m \e[1;38;5;33m▀▀▀▀\e[0m \e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m \e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m       \e[1;38;5;33m▀▀▀▀\e[0m  \e[1;38;5;33m▀▀▀\e[0m  \e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m \e[1;38;5;33m▀▀▀▀\e[0m'
+  $''
+  $'\e[1;38;5;137mT\e[0m \e[1;38;5;137mE\e[0m \e[1;38;5;137mC\e[0m \e[1;38;5;137mH\e[0m \e[1;38;5;137mN\e[0m \e[1;38;5;137mO\e[0m \e[1;38;5;137mL\e[0m \e[1;38;5;137mO\e[0m \e[1;38;5;137mG\e[0m \e[1;38;5;137mY\e[0m   \e[1;38;5;137mI\e[0m \e[1;38;5;137mN\e[0m \e[1;38;5;137mF\e[0m \e[1;38;5;137mR\e[0m \e[1;38;5;137mA\e[0m \e[1;38;5;137mS\e[0m \e[1;38;5;137mT\e[0m \e[1;38;5;137mR\e[0m \e[1;38;5;137mU\e[0m \e[1;38;5;137mC\e[0m \e[1;38;5;137mT\e[0m \e[1;38;5;137mU\e[0m \e[1;38;5;137mR\e[0m \e[1;38;5;137mE\e[0m'
+)
+
+show_banner() {
+  is_yes "${LNMS_NO_BANNER:-no}" && return 0
+  local rows cols l
+  rows=$(tput lines 2>/dev/null || echo 40); cols=$(tput cols 2>/dev/null || echo 80)
+  [[ $rows =~ ^[0-9]+$ ]] || rows=40
+  [[ $cols =~ ^[0-9]+$ ]] || cols=80
+  printf '\n'
+  if ((cols >= 54 && rows >= 34)); then
+    for l in "${GNC_ICON[@]}"; do printf '  %b\n' "$l"; done   # logo penuh: ikon + teks
+    printf '\n'
+  fi
+  if ((cols >= 54 && rows >= 18)); then
+    for l in "${GNC_TEXT[@]}"; do printf '  %b\n' "$l"; done
+  else                                                         # terminal kecil: 1 baris
+    printf '  \e[1;38;5;33mGALURA NEXA CORE\e[0m  \e[38;5;137mTechnology Infrastructure\e[0m\n'
+  fi
+  [[ -n ${LNMS_BRAND_TAGLINE:-} ]] && printf '\n  %s%s%s\n' "$C_BLD" "$LNMS_BRAND_TAGLINE" "$C_RST"
+  printf '\n  %sLibreNMS Docker Installer v%s  •  Debian 13%s\n' "$C_CYN" "$SCRIPT_VERSION" "$C_RST"
+  printf '  %s%s%s\n\n' "$C_CYN" '──────────────────────────────────────────────────' "$C_RST"
 }
 
 # ---------------------------------------------------------------------------
@@ -1097,7 +1154,9 @@ main() {
   set_defaults
   preflight
   attach_tty
-  printf '%s%sLibreNMS Docker Installer v%s%s\n\n' "$C_BLD" "$C_CYN" "$SCRIPT_VERSION" "$C_RST"
+  is_unattended || clear 2>/dev/null || true
+  show_banner
+  is_unattended || sleep 1
   check_internet
   install_prereqs
   check_os
@@ -1106,7 +1165,7 @@ main() {
   if is_unattended; then collect_unattended; else collect_interactive; fi
   finalize_config
   confirm_config
-  is_unattended || clear 2>/dev/null || true
+  is_unattended || { clear 2>/dev/null || true; show_banner; }
 
   log "Memulai instalasi — log detail: $LOG_FILE"
   set_hostname_tz
