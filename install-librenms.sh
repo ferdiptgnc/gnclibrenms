@@ -3,7 +3,7 @@
 # ============================================================================
 #  install-librenms.sh — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
 # ============================================================================
-#  Versi  : 1.0.1
+#  Versi  : 1.0.2
 #  Target : PC/VM dengan Debian 13 yang baru diinstall (minimal / netinst)
 #
 #  Cara pakai (sebagai root):
@@ -21,7 +21,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 readonly LOG_FILE="/var/log/librenms-install.log"
 readonly BACKTITLE="LibreNMS Docker Installer v${SCRIPT_VERSION}  |  Debian 13"
 
@@ -828,6 +828,27 @@ start_stack() {
   ok "Container inti berjalan"
 }
 
+# Wizard web (/install) tetap muncul selama .env di volume data masih punya baris INSTALL=.
+# Admin sudah dibuat via CLI, jadi penanda itu dihapus agar Web UI langsung ke halaman login.
+finalize_install() {
+  local envf=$LNMS_INSTALL_DIR/librenms/.env cf=$LNMS_INSTALL_DIR/compose.yml loc
+  if [[ -f $envf ]] && grep -q '^INSTALL=' "$envf"; then
+    log "Menandai instalasi selesai (melewati wizard web)..."
+    cp -p "$envf" "$envf.bak"
+    sed -i '/^INSTALL=/d' "$envf"
+    chown --reference="$envf.bak" "$envf"; chmod --reference="$envf.bak" "$envf"
+    run "${COMPOSE[@]}" -f "$cf" restart librenms
+    wait_ready
+  fi
+  loc=$(curl -s -o /dev/null -m 5 -w '%{redirect_url}' "http://127.0.0.1:${LNMS_HTTP_PORT}/login" 2>/dev/null || true)
+  if [[ $loc == */install* ]]; then
+    warn "Web UI masih mengarah ke wizard /install. Cek: grep INSTALL $envf"
+    WIZARD_PENDING=yes
+  else
+    ok "Web UI siap login tanpa wizard"
+  fi
+}
+
 start_workers() {
   local cf=$LNMS_INSTALL_DIR/compose.yml
   log "Menjalankan dispatcher & sidecar..."
@@ -1058,6 +1079,7 @@ show_summary() {
   printf '  Username       : %s\n' "$LNMS_ADMIN_USER"
   printf '  Password       : %s\n' "$pass_line"
   [[ ${ADMIN_FAILED:-no} == yes ]] && printf '  %sUser admin GAGAL dibuat otomatis — lihat peringatan di atas.%s\n' "$C_RED" "$C_RST"
+  [[ ${WIZARD_PENDING:-no} == yes ]] && printf '  %sWizard /install masih aktif — lihat peringatan di atas.%s\n' "$C_YLW" "$C_RST"
   printf '  SNMP community : %s\n' "$LNMS_SNMP_COMMUNITY"
   printf '  Info lengkap   : %s/INSTALL-INFO.txt\n' "$LNMS_INSTALL_DIR"
   printf '  Log instalasi  : %s\n' "$LOG_FILE"
@@ -1093,6 +1115,7 @@ main() {
   start_stack
   wait_ready
   create_admin
+  [[ ${ADMIN_FAILED:-no} == yes ]] || finalize_install
   start_workers
   configure_librenms
   setup_self_monitoring
