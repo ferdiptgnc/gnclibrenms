@@ -16,10 +16,10 @@ Login sebagai **root** (`su -`). Debian minimal biasanya sudah punya `wget` tapi
 
 ```bash
 # Interaktif (dialog)
-wget -qO- https://raw.githubusercontent.com/USER/REPO/main/install-librenms.sh | bash
+wget -qO- https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-librenms.sh | bash
 
 # atau download dulu, lalu jalankan
-wget https://raw.githubusercontent.com/USER/REPO/main/install-librenms.sh
+wget https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-librenms.sh
 bash install-librenms.sh
 ```
 
@@ -55,7 +55,7 @@ bash install-librenms.sh --unattended --config client-a.conf
 Variabel juga bisa diberikan langsung lewat environment:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/USER/REPO/main/install-librenms.sh \
+wget -qO- https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-librenms.sh \
   | LNMS_ADMIN_PASS='PasswordKuat123' LNMS_SNMP_COMMUNITY='komunitasRahasia' bash -s -- --unattended
 ```
 
