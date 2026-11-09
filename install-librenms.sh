@@ -3,7 +3,7 @@
 # ============================================================================
 #  install-librenms.sh — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
 # ============================================================================
-#  Versi  : 1.0.0
+#  Versi  : 1.0.1
 #  Target : PC/VM dengan Debian 13 yang baru diinstall (minimal / netinst)
 #
 #  Cara pakai (sebagai root):
@@ -21,7 +21,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly LOG_FILE="/var/log/librenms-install.log"
 readonly BACKTITLE="LibreNMS Docker Installer v${SCRIPT_VERSION}  |  Debian 13"
 
@@ -819,9 +819,20 @@ start_stack() {
   if ! "${COMPOSE[@]}" -f "$cf" pull; then
     die "Gagal download image Docker. Cek koneksi internet lalu jalankan ulang."
   fi
-  log "Menjalankan container..."
+  # Tahap 1: hanya container inti. Migrasi DB dijalankan oleh container 'librenms';
+  # dispatcher & sidecar baru dinyalakan setelah web siap agar tidak query tabel yang belum ada.
+  local core=(db redis librenms)
+  is_yes "$LNMS_ENABLE_SMTP" && core+=(msmtpd)
+  log "Menjalankan container inti (${core[*]})..."
+  run "${COMPOSE[@]}" -f "$cf" up -d --no-deps "${core[@]}"
+  ok "Container inti berjalan"
+}
+
+start_workers() {
+  local cf=$LNMS_INSTALL_DIR/compose.yml
+  log "Menjalankan dispatcher & sidecar..."
   run "${COMPOSE[@]}" -f "$cf" up -d
-  ok "Container berjalan"
+  ok "Semua container berjalan"
 }
 
 wait_ready() {
@@ -1082,6 +1093,7 @@ main() {
   start_stack
   wait_ready
   create_admin
+  start_workers
   configure_librenms
   setup_self_monitoring
   open_firewall
