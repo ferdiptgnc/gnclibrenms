@@ -3,7 +3,7 @@
 # ============================================================================
 #  install-librenms.sh — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
 # ============================================================================
-#  Versi  : 1.0.5
+#  Versi  : 1.0.6
 #  Target : PC/VM dengan Debian 13 yang baru diinstall (minimal / netinst)
 #
 #  Cara pakai (sebagai root):
@@ -21,7 +21,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.0.5"
+readonly SCRIPT_VERSION="1.0.6"
 readonly LOG_FILE="/var/log/librenms-install.log"
 readonly BACKTITLE="LibreNMS Docker Installer v${SCRIPT_VERSION}  |  Debian 13"
 
@@ -51,6 +51,7 @@ set_defaults() {
   : "${LNMS_MONITOR_SELF:=yes}"          # install snmpd & tambahkan PC ini
   : "${LNMS_LOCATION:=Kantor Klien}"     # sysLocation untuk snmpd PC ini
   : "${LNMS_ENABLE_SMTP:=no}"
+  : "${LNMS_ALLOW_DUP_SYSNAME:=yes}"     # izinkan device dengan sysName sama (mis. banyak switch Ruijie default)
   : "${LNMS_SMTP_HOST:=smtp.gmail.com}"
   : "${LNMS_SMTP_PORT:=587}"
   : "${LNMS_SMTP_USER:=}"
@@ -489,17 +490,19 @@ Tekan ESC/Cancel di dialog mana pun untuk membatalkan." 22
 
   # --- Komponen tambahan ---
   sel=$(whiptail --backtitle "$BACKTITLE" --title "Komponen Tambahan" --checklist \
-    "Pilih komponen (SPASI = pilih, ENTER = lanjut):" 15 "$WT_W" 4 \
+    "Pilih komponen (SPASI = pilih, ENTER = lanjut):" 16 "$WT_W" 5 \
     "syslog" "Syslog receiver (port 514 tcp/udp)"      "$(onoff "$LNMS_ENABLE_SYSLOG")" \
     "trap"   "SNMP trap receiver (port 162 tcp/udp)"   "$(onoff "$LNMS_ENABLE_TRAP")" \
     "self"   "Monitor PC ini sendiri (install snmpd)"  "$(onoff "$LNMS_MONITOR_SELF")" \
     "smtp"   "Kirim email alert via SMTP relay"        "$(onoff "$LNMS_ENABLE_SMTP")" \
+    "dupsys" "Izinkan sysName duplikat (Ruijie dll)"   "$(onoff "$LNMS_ALLOW_DUP_SYSNAME")" \
     3>&1 1>&2 2>&3) || user_cancel
-  LNMS_ENABLE_SYSLOG=no; LNMS_ENABLE_TRAP=no; LNMS_MONITOR_SELF=no; LNMS_ENABLE_SMTP=no
+  LNMS_ENABLE_SYSLOG=no; LNMS_ENABLE_TRAP=no; LNMS_MONITOR_SELF=no; LNMS_ENABLE_SMTP=no; LNMS_ALLOW_DUP_SYSNAME=no
   [[ $sel == *'"syslog"'* ]] && LNMS_ENABLE_SYSLOG=yes
   [[ $sel == *'"trap"'*   ]] && LNMS_ENABLE_TRAP=yes
   [[ $sel == *'"self"'*   ]] && LNMS_MONITOR_SELF=yes
   [[ $sel == *'"smtp"'*   ]] && LNMS_ENABLE_SMTP=yes
+  [[ $sel == *'"dupsys"'* ]] && LNMS_ALLOW_DUP_SYSNAME=yes
 
   if is_yes "$LNMS_MONITOR_SELF"; then
     ask_input LNMS_LOCATION "Lokasi" "Lokasi PC ini (sysLocation SNMP):" "$LNMS_LOCATION" valid_nonempty "Lokasi tidak boleh kosong."
@@ -614,6 +617,7 @@ confirm_config() {
   SNMP trap (162): $LNMS_ENABLE_TRAP
   Monitor PC ini : $LNMS_MONITOR_SELF
   Email alert    : $smtp_txt
+  sysName dobel  : $LNMS_ALLOW_DUP_SYSNAME
   Folder         : $LNMS_INSTALL_DIR
   PHP memory     : $LNMS_MEMORY_LIMIT"
 
@@ -1009,6 +1013,11 @@ configure_librenms() {
     ok "SNMP community default diset"
   else
     warn "Gagal set community default, atur manual di Settings > Poller > SNMP"
+  fi
+
+  if is_yes "$LNMS_ALLOW_DUP_SYSNAME"; then
+    if lnms config:set allow_duplicate_sysName true >>"$LOG_FILE" 2>&1; then ok "sysName duplikat diizinkan"
+    else warn "Gagal set allow_duplicate_sysName: jalankan 'lnms config:set allow_duplicate_sysName true'"; fi
   fi
 
   if is_yes "$LNMS_ENABLE_SYSLOG"; then
