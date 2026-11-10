@@ -3,12 +3,12 @@
 # ============================================================================
 #  install-librenms.sh — Installer LibreNMS (Docker) untuk Debian 13 "trixie"
 # ============================================================================
-#  Versi  : 1.1.0
+#  Versi  : 1.1.1
 #  Target : PC/VM dengan Debian 13 yang baru diinstall (minimal / netinst)
 #
 #  Cara pakai (sebagai root):
-#    wget -qO- https://raw.githubusercontent.com/USER/REPO/main/install-librenms.sh | bash
-#    curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/install-librenms.sh | bash
+#    wget -qO- https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-librenms.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-librenms.sh | bash
 #    bash install-librenms.sh                      # dari file lokal
 #
 #  Mode tanpa dialog (deploy massal):
@@ -21,7 +21,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly LOG_FILE="/var/log/librenms-install.log"
 readonly BACKTITLE="LibreNMS Docker Installer v${SCRIPT_VERSION}  |  Debian 13"
 
@@ -1138,15 +1138,19 @@ EOF
 #    gnclibre backup           backup database
 #    gnclibre logs [service]   ikuti log container (default: librenms)
 #    gnclibre validate         jalankan validate.php
+#    gnclibre self-update      perbarui gnclibre dari GitHub
+#
+#  Sumber: https://github.com/ferdiptgnc/gnclibrenms
 # ============================================================================
 
 set -uo pipefail
 
-readonly GNCLIBRE_VERSION="1.0.0"
+readonly GNCLIBRE_VERSION="1.0.1"
 readonly CONF_FILE=${GNCLIBRE_CONF:-/etc/gnclibre.conf}
 readonly LOG=${GNCLIBRE_LOG:-/var/log/gnclibre.log}
 readonly BT="GNC LibreNMS Manager v${GNCLIBRE_VERSION}  |  Galura Nexa Core"
 readonly W=78
+readonly REPO_RAW=${GNCLIBRE_REPO_RAW:-https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main}
 readonly DEFAULT_PROXIES="127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
 TUI=0
 
@@ -1190,6 +1194,7 @@ Pemakaian (sebagai root):
   gnclibre backup           backup database
   gnclibre logs [service]   ikuti log container (default: librenms)
   gnclibre validate         jalankan validate.php
+  gnclibre self-update      perbarui gnclibre dari GitHub
   gnclibre version          versi gnclibre
 EOF
 }
@@ -1870,16 +1875,32 @@ main_menu() {
   done
 }
 
+self_update() {
+  local tmp new self
+  self=$(readlink -f "$0")
+  tmp=$(mktemp)
+  say "Mengunduh gnclibre terbaru dari $REPO_RAW ..."
+  if command -v curl >/dev/null 2>&1; then curl -fsSL -m 60 "$REPO_RAW/gnclibre" -o "$tmp"
+  else wget -qO "$tmp" "$REPO_RAW/gnclibre"; fi || { rm -f "$tmp"; die "Gagal mengunduh. Cek koneksi internet."; }
+  new=$(grep -m1 -o 'GNCLIBRE_VERSION="[^"]*"' "$tmp" | cut -d'"' -f2)
+  if [[ -z $new ]] || ! bash -n "$tmp" 2>/dev/null; then rm -f "$tmp"; die "File unduhan tidak valid, gnclibre tidak diubah."; fi
+  if [[ $new == "$GNCLIBRE_VERSION" ]]; then rm -f "$tmp"; okp "gnclibre sudah versi terbaru ($new)."; return 0; fi
+  install -m 755 "$tmp" "$self" && rm -f "$tmp" || die "Gagal menulis $self"
+  logf "self-update $GNCLIBRE_VERSION -> $new"
+  okp "gnclibre diperbarui: $GNCLIBRE_VERSION -> $new"
+}
+
 main() {
   local cmd=${1:-menu} f
   case $cmd in
     -h|--help|help) show_banner; usage; return 0 ;;
     -v|--version|version) echo "gnclibre $GNCLIBRE_VERSION"; return 0 ;;
-    menu|status|passwd|restart|update|backup|logs|validate) ;;
+    menu|status|passwd|restart|update|backup|logs|validate|self-update) ;;
     *) usage; return 1 ;;
   esac
   need_root "$@"
   touch "$LOG" 2>/dev/null && chmod 600 "$LOG" 2>/dev/null
+  [[ $cmd == self-update ]] && { self_update; return; }
   command -v docker >/dev/null 2>&1 || die "Docker tidak ditemukan."
   load_env
   case $cmd in
