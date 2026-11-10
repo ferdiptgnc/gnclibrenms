@@ -1,5 +1,7 @@
 # LibreNMS Docker Installer — Debian 13
 
+Repo: https://github.com/ferdiptgnc/gnclibrenms
+
 Installer satu file untuk memasang **LibreNMS berbasis Docker** di PC/VM yang baru diinstall **Debian 13 (trixie)**. Bisa interaktif (dialog) atau tanpa dialog untuk deploy massal.
 
 ## Yang diinstall
@@ -40,7 +42,7 @@ Setelah selesai, buka `http://IP-PC` (atau `http://IP-PC:PORT` kalau port bukan 
 | Email admin | `admin@localhost` | dipakai juga sebagai sysContact |
 | Password database | generate otomatis | |
 | SNMP community | `public` | **disarankan diganti** |
-| Komponen tambahan | syslog ✓, trap ✓, monitor PC ini ✓, SMTP ✗ | |
+| Komponen tambahan | syslog ✓, trap ✓, monitor PC ini ✓, SMTP ✗, sysName duplikat ✓ | sysName duplikat perlu untuk banyak switch dengan hostname default (mis. Ruijie `ruijie`) |
 | Lokasi (sysLocation) | `Kantor Klien` | |
 | Folder instalasi | `/opt/librenms` | |
 | PHP memory limit | `256M` | |
@@ -50,7 +52,7 @@ Setelah selesai, buka `http://IP-PC` (atau `http://IP-PC:PORT` kalau port bukan 
 Untuk banyak PC, siapkan satu file config per klien (lihat `client.conf.example`), lalu jalankan:
 
 ```bash
-wget https://raw.githubusercontent.com/USER/REPO/main/install-librenms.sh
+wget https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-librenms.sh
 bash install-librenms.sh --unattended --config client-a.conf
 ```
 
@@ -63,16 +65,51 @@ wget -qO- https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/install-
 
 Kalau `LNMS_ADMIN_PASS` dikosongkan, password akan di-generate lalu ditampilkan di akhir dan disimpan di `INSTALL-INFO.txt`.
 
-## Perintah setelah instalasi
+## Pengelolaan setelah instalasi: `gnclibre`
+
+Installer memasang perintah **`gnclibre`**. Login sebagai root, lalu ketik:
 
 ```bash
-cd /opt/librenms
-docker compose ps                               # status container
-docker compose logs -f librenms                 # log
-docker compose pull && docker compose up -d     # update LibreNMS
-docker exec --user librenms librenms php validate.php
-docker exec -it --user librenms librenms lnms user:password admin   # reset password
+gnclibre
 ```
+
+Menu yang tersedia:
+
+| Menu | Isi |
+|---|---|
+| Status & informasi | status container, Web UI, jumlah user/device, isi `INSTALL-INFO.txt` |
+| Akun admin / user | daftar user, ganti password, ganti username, tambah user (admin / read-only / user) |
+| Akses web | ubah URL publik (Cloudflare), trusted proxy, port web |
+| SNMP & device | daftar device, tambah device, ubah community default, izinkan sysName duplikat |
+| Email alert | atur SMTP (Gmail, dll); service msmtpd ditambahkan otomatis bila belum ada |
+| Zona waktu | WIB / WITA / WIT / lainnya |
+| Layanan | restart, stop/start, lihat log, `validate.php`, update ke image terbaru (DB dibackup dulu) |
+| Backup & restore | backup database, backup lengkap (DB + grafik RRD + config), restore database |
+
+Perintah langsung tanpa menu (bisa dipakai di script):
+
+```bash
+gnclibre status           # ringkasan status
+gnclibre passwd admin     # ganti password user admin
+gnclibre backup           # backup database ke /opt/librenms/backups
+gnclibre update           # backup DB, lalu update LibreNMS
+gnclibre restart          # restart semua container
+gnclibre logs [service]   # ikuti log (default: librenms)
+gnclibre validate         # jalankan validate.php
+gnclibre self-update      # perbarui gnclibre dari repo ini
+```
+
+Semua perubahan dicatat di `/var/log/gnclibre.log`.
+
+**Memasang `gnclibre` di server yang sudah terinstall sebelumnya** (installer versi lama atau instalasi manual):
+
+```bash
+wget -qO /usr/local/bin/gnclibre https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main/gnclibre
+chmod +x /usr/local/bin/gnclibre
+gnclibre
+```
+
+Folder instalasi dideteksi otomatis dari container Docker. Kalau tidak terdeteksi, isi `LNMS_INSTALL_DIR=/path/folder` di `/etc/gnclibre.conf`.
 
 ## Akses lewat Cloudflare Tunnel
 
