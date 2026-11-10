@@ -1,0 +1,795 @@
+#!/usr/bin/env bash
+#
+# ============================================================================
+#  gnclibre — Menu pengelolaan LibreNMS (Docker)
+#  Galura Nexa Core — Technology Infrastructure
+# ============================================================================
+#  Dipasang otomatis oleh install-librenms.sh ke /usr/local/bin/gnclibre.
+#
+#  Pemakaian (sebagai root):
+#    gnclibre                  menu interaktif
+#    gnclibre status           ringkasan status
+#    gnclibre passwd [user]    ganti password user (default: admin)
+#    gnclibre restart          restart semua container
+#    gnclibre update           backup DB lalu update image LibreNMS
+#    gnclibre backup           backup database
+#    gnclibre logs [service]   ikuti log container (default: librenms)
+#    gnclibre validate         jalankan validate.php
+#    gnclibre self-update      perbarui gnclibre dari GitHub
+#
+#  Sumber: https://github.com/ferdiptgnc/gnclibrenms
+# ============================================================================
+
+set -uo pipefail
+
+readonly GNCLIBRE_VERSION="1.0.1"
+readonly CONF_FILE=${GNCLIBRE_CONF:-/etc/gnclibre.conf}
+readonly LOG=${GNCLIBRE_LOG:-/var/log/gnclibre.log}
+readonly BT="GNC LibreNMS Manager v${GNCLIBRE_VERSION}  |  Galura Nexa Core"
+readonly W=78
+readonly REPO_RAW=${GNCLIBRE_REPO_RAW:-https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main}
+readonly DEFAULT_PROXIES="127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+TUI=0
+
+# Logo teks GNC (sama dengan installer)
+GNC_TEXT=(
+  $'  \e[1;38;5;33m██████\e[0m   \e[1;38;5;33m█████\e[0m  \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██████\e[0m   \e[1;38;5;33m█████\e[0m'
+  $' \e[1;38;5;33m██\e[0m       \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m'
+  $' \e[1;38;5;33m██\e[0m   \e[1;38;5;33m███\e[0m \e[1;38;5;33m███████\e[0m \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██████\e[0m  \e[1;38;5;33m███████\e[0m'
+  $' \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m      \e[1;38;5;33m██\e[0m    \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m'
+  $'  \e[1;38;5;33m██████\e[0m  \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m███████\e[0m  \e[1;38;5;33m██████\e[0m  \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m \e[1;38;5;33m██\e[0m   \e[1;38;5;33m██\e[0m'
+  $''
+  $'\e[1;38;5;33m█▄\e[0m  \e[1;38;5;33m█\e[0m \e[1;38;5;33m█▀▀▀\e[0m \e[1;38;5;33m▀▄\e[0m \e[1;38;5;33m▄▀\e[0m \e[1;38;5;33m▄▀▀▀▄\e[0m      \e[1;38;5;33m▄▀▀▀▀\e[0m \e[1;38;5;33m▄▀▀▀▄\e[0m \e[1;38;5;33m█▀▀▀▄\e[0m \e[1;38;5;33m█▀▀▀\e[0m'
+  $'\e[1;38;5;33m█\e[0m \e[1;38;5;33m▀▄█\e[0m \e[1;38;5;33m█▀▀\e[0m   \e[1;38;5;33m▄▀▄\e[0m  \e[1;38;5;33m█▀▀▀█\e[0m      \e[1;38;5;33m█\e[0m     \e[1;38;5;33m█\e[0m   \e[1;38;5;33m█\e[0m \e[1;38;5;33m█▀▀█\e[0m  \e[1;38;5;33m█▀▀\e[0m'
+  $'\e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m \e[1;38;5;33m▀▀▀▀\e[0m \e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m \e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m       \e[1;38;5;33m▀▀▀▀\e[0m  \e[1;38;5;33m▀▀▀\e[0m  \e[1;38;5;33m▀\e[0m   \e[1;38;5;33m▀\e[0m \e[1;38;5;33m▀▀▀▀\e[0m'
+  $''
+  $'\e[1;38;5;137mT\e[0m \e[1;38;5;137mE\e[0m \e[1;38;5;137mC\e[0m \e[1;38;5;137mH\e[0m \e[1;38;5;137mN\e[0m \e[1;38;5;137mO\e[0m \e[1;38;5;137mL\e[0m \e[1;38;5;137mO\e[0m \e[1;38;5;137mG\e[0m \e[1;38;5;137mY\e[0m   \e[1;38;5;137mI\e[0m \e[1;38;5;137mN\e[0m \e[1;38;5;137mF\e[0m \e[1;38;5;137mR\e[0m \e[1;38;5;137mA\e[0m \e[1;38;5;137mS\e[0m \e[1;38;5;137mT\e[0m \e[1;38;5;137mR\e[0m \e[1;38;5;137mU\e[0m \e[1;38;5;137mC\e[0m \e[1;38;5;137mT\e[0m \e[1;38;5;137mU\e[0m \e[1;38;5;137mR\e[0m \e[1;38;5;137mE\e[0m'
+)
+
+C_RED=$'\e[31m'; C_GRN=$'\e[32m'; C_YLW=$'\e[33m'; C_CYN=$'\e[36m'; C_RST=$'\e[0m'
+say()   { printf '%s==>%s %s\n' "$C_CYN" "$C_RST" "$*"; }
+okp()   { printf '%s[ OK ]%s %s\n' "$C_GRN" "$C_RST" "$*"; }
+warnp() { printf '%s[WARN]%s %s\n' "$C_YLW" "$C_RST" "$*" >&2; }
+die()   { printf '%s[GAGAL]%s %s\n' "$C_RED" "$C_RST" "$*" >&2; exit 1; }
+logf()  { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || true; }
+
+show_banner() {
+  local l
+  printf '\n'
+  for l in "${GNC_TEXT[@]}"; do printf '  %b\n' "$l"; done
+  printf '\n  %sGNC LibreNMS Manager v%s%s\n\n' "$C_CYN" "$GNCLIBRE_VERSION" "$C_RST"
+}
+
+usage() {
+  cat <<'EOF'
+Pemakaian (sebagai root):
+  gnclibre                  menu interaktif
+  gnclibre status           ringkasan status
+  gnclibre passwd [user]    ganti password user (default: admin)
+  gnclibre restart          restart semua container
+  gnclibre update           backup DB lalu update image LibreNMS
+  gnclibre backup           backup database
+  gnclibre logs [service]   ikuti log container (default: librenms)
+  gnclibre validate         jalankan validate.php
+  gnclibre self-update      perbarui gnclibre dari GitHub
+  gnclibre version          versi gnclibre
+EOF
+}
+
+trim() {
+  local s=$1
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# Validator
+# ---------------------------------------------------------------------------
+valid_ipv4() {
+  local o
+  [[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1}"; do ((10#$o <= 255)) || return 1; done
+}
+valid_port()      { [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+valid_username()  { [[ $1 =~ ^[A-Za-z0-9._-]{3,32}$ ]]; }
+valid_email()     { [[ $1 =~ ^[^[:space:]@\']+@[^[:space:]@\']+$ ]]; }
+valid_community() { [[ $1 =~ ^[A-Za-z0-9._@#%+=:-]{1,64}$ ]]; }
+valid_tz()        { [[ -n $1 && $1 != *..* && -f /usr/share/zoneinfo/$1 ]]; }
+valid_safe_pass() { [[ -n $1 && $1 != *"'"* && $1 != *$'\n'* ]]; }
+valid_nonempty()  { [[ -n $1 ]]; }
+valid_host()      { valid_ipv4 "$1" || [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]]; }
+valid_public_url() { [[ -z $1 || $1 =~ ^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?$ ]]; }
+valid_proxy_list() {
+  local p pf
+  [[ $1 == "*" || $1 == "**" ]] && return 0
+  [[ -n $1 ]] || return 1
+  for p in ${1//,/ }; do
+    valid_ipv4 "${p%/*}" || return 1
+    if [[ $p == */* ]]; then pf=${p#*/}; [[ $pf =~ ^[0-9]{1,2}$ ]] && ((pf <= 32)) || return 1; fi
+  done
+}
+
+sql_esc() { local s=${1//\\/\\\\}; printf '%s' "${s//\'/\'\'}"; }
+
+# ---------------------------------------------------------------------------
+# Lingkungan & akses Docker
+# ---------------------------------------------------------------------------
+need_root() {
+  [[ $EUID -eq 0 ]] && return 0
+  command -v sudo >/dev/null 2>&1 && exec sudo -- "$0" "$@"
+  die "Jalankan sebagai root (su - lalu gnclibre)."
+}
+
+ensure_whiptail() {
+  command -v whiptail >/dev/null 2>&1 && return 0
+  say "Memasang whiptail..."
+  apt-get install -y whiptail >>"$LOG" 2>&1 || die "whiptail tidak tersedia. Jalankan: apt-get install -y whiptail"
+}
+
+load_env() {
+  local f
+  # shellcheck disable=SC1090
+  [[ -r $CONF_FILE ]] && . "$CONF_FILE"
+  DIR=${LNMS_INSTALL_DIR:-}
+  if [[ -z $DIR || ! -d $DIR ]]; then
+    DIR=$(docker ps -a --filter label=com.docker.compose.service=librenms \
+      --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | head -n1)
+  fi
+  [[ -n $DIR && -d $DIR ]] || die "Instalasi LibreNMS tidak ditemukan. Isi LNMS_INSTALL_DIR=/path di $CONF_FILE"
+  CF=""
+  for f in compose.yml compose.yaml docker-compose.yml docker-compose.yaml; do
+    [[ -f $DIR/$f ]] && { CF=$DIR/$f; break; }
+  done
+  [[ -n $CF ]] || die "File compose tidak ditemukan di $DIR"
+  ENVF=$DIR/.env; LENV=$DIR/librenms.env; DENV=$DIR/librenms/.env; MENV=$DIR/msmtpd.env
+  INFO=$DIR/INSTALL-INFO.txt; BK=$DIR/backups
+  if docker compose version >/dev/null 2>&1; then DC=(docker compose)
+  elif command -v docker-compose >/dev/null 2>&1; then DC=(docker-compose)
+  else die "Docker Compose tidak ditemukan."; fi
+}
+
+dc()     { "${DC[@]}" -f "$CF" --project-directory "$DIR" "$@"; }
+lnms_c() { dc exec -T --user librenms librenms lnms "$@"; }
+# SQL dibaca dari stdin; kredensial diambil dari env container database
+sqlq()   { dc exec -T db sh -c 'exec mariadb -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -N -B'; }
+services() { dc config --services 2>/dev/null; }
+has_service() { services | grep -qx "$1"; }
+
+web_port() {
+  local p
+  p=$(dc port librenms 8000 2>/dev/null | head -n1); p=${p##*:}
+  [[ $p =~ ^[0-9]+$ ]] || p=$(envget "$ENVF" HTTP_PORT)
+  echo "${p:-80}"
+}
+local_ip()  { local ip; ip=$(hostname -I 2>/dev/null | awk '{print $1}'); echo "${ip:-127.0.0.1}"; }
+local_url() { local p; p=$(web_port); if [[ $p == 80 ]]; then echo "http://$(local_ip)"; else echo "http://$(local_ip):$p"; fi; }
+web_code()  { curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$(web_port)/login" 2>/dev/null; }
+
+wait_web() {
+  local i c
+  for ((i = 1; i <= 60; i++)); do
+    c=$(web_code); [[ $c == 200 || $c == 302 ]] && return 0
+    sleep 3
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# File .env & INSTALL-INFO (menjaga owner/permission file asli)
+# ---------------------------------------------------------------------------
+envget() { [[ -f $1 ]] && K="$2" awk 'index($0, ENVIRON["K"] "=") == 1 { print substr($0, length(ENVIRON["K"]) + 2); exit }' "$1"; return 0; }
+envset() {
+  local f=$1 tmp; tmp=$(mktemp)
+  [[ -f $f ]] || { touch "$f"; chmod 600 "$f"; }
+  K="$2" V="$3" awk 'BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"] }
+    index($0, k "=") == 1 { if (!d) { print k "=" v; d = 1 }; next } { print }
+    END { if (!d) print k "=" v }' "$f" >"$tmp" && cat "$tmp" >"$f"
+  rm -f "$tmp"
+}
+envdel() {
+  local f=$1 tmp; [[ -f $f ]] || return 0; tmp=$(mktemp)
+  K="$2" awk 'index($0, ENVIRON["K"] "=") != 1' "$f" >"$tmp" && cat "$tmp" >"$f"
+  rm -f "$tmp"
+}
+info_get() { [[ -f $INFO ]] && P="$1" awk 'index($0, ENVIRON["P"]) == 1 { sub(/^[^:]*: */, ""); print; exit }' "$INFO"; return 0; }
+info_set() {
+  [[ -f $INFO ]] || return 0
+  local tmp; tmp=$(mktemp)
+  P="$1" V="$2" awk 'index($0, ENVIRON["P"]) == 1 { print ENVIRON["P"] ": " ENVIRON["V"]; f = 1; next } { print }
+    END { if (!f) print ENVIRON["P"] ": " ENVIRON["V"] }' "$INFO" >"$tmp" && cat "$tmp" >"$INFO"
+  rm -f "$tmp"
+}
+
+# ---------------------------------------------------------------------------
+# Helper tampilan (whiptail di mode menu, teks biasa di mode CLI)
+# ---------------------------------------------------------------------------
+ui_msg()   { if ((TUI)); then whiptail --backtitle "$BT" --title "$1" --msgbox "$2" "${3:-13}" "$W"; else printf '\n%s\n%b\n' "$1" "$2"; fi; return 0; }
+ui_info()  { if ((TUI)); then whiptail --backtitle "$BT" --title "Mohon tunggu" --infobox "$1" 8 "$W"; else say "$1"; fi; logf "$1"; }
+ui_yesno() { local o=(); [[ ${3:-} == no ]] && o=(--defaultno); whiptail --backtitle "$BT" --title "$1" "${o[@]}" --yesno "$2" 13 "$W"; }
+ui_menu()  { local t=$1 x=$2; shift 2; whiptail --backtitle "$BT" --title "$t" --menu "$x" 22 "$W" 12 "$@" 3>&1 1>&2 2>&3; }
+
+# ui_input VAR "Judul" "Teks" "default" [validator] ["pesan error"]   (return 1 = batal)
+ui_input() {
+  local __v=$1 title=$2 text=$3 def=$4 val=${5:-} err=${6:-"Input tidak valid, silakan ulangi."} out
+  while true; do
+    out=$(whiptail --backtitle "$BT" --title "$title" --inputbox "$text" 15 "$W" "$def" 3>&1 1>&2 2>&3) || return 1
+    out=$(trim "$out")
+    if [[ -z $val ]] || "$val" "$out"; then printf -v "$__v" '%s' "$out"; return 0; fi
+    ui_msg "Input tidak valid" "$err"; def=$out
+  done
+}
+
+# ui_pass VAR "Judul" minlen [validator] ["pesan error"]
+ui_pass() {
+  local __v=$1 title=$2 min=${3:-8} val=${4:-} err=${5:-} p1 p2
+  while true; do
+    p1=$(whiptail --backtitle "$BT" --title "$title" --passwordbox "Masukkan password (minimal $min karakter):" 10 "$W" 3>&1 1>&2 2>&3) || return 1
+    if ((${#p1} < min)); then ui_msg "Password terlalu pendek" "Password minimal $min karakter."; continue; fi
+    if [[ -n $val ]] && ! "$val" "$p1"; then ui_msg "Password tidak valid" "$err"; continue; fi
+    p2=$(whiptail --backtitle "$BT" --title "$title" --passwordbox "Ulangi password:" 10 "$W" 3>&1 1>&2 2>&3) || return 1
+    [[ $p1 == "$p2" ]] || { ui_msg "Password tidak sama" "Kedua password tidak sama, silakan ulangi."; continue; }
+    printf -v "$__v" '%s' "$p1"; return 0
+  done
+}
+
+# ui_run "Judul" perintah...  -> jalankan, tampilkan output di textbox
+ui_run() {
+  local t=$1 tmp rc; shift; tmp=$(mktemp)
+  ((TUI)) && whiptail --backtitle "$BT" --title "Mohon tunggu" --infobox "Menjalankan: $t ..." 8 "$W"
+  "$@" >"$tmp" 2>&1; rc=$?
+  sed -i 's/\x1b\[[0-9;]*m//g' "$tmp"
+  [[ -s $tmp ]] || echo "(tidak ada output)" >"$tmp"
+  if ((TUI)); then whiptail --backtitle "$BT" --title "$t" --scrolltext --textbox "$tmp" 24 "$W"; else cat "$tmp"; fi
+  rm -f "$tmp"; return $rc
+}
+
+apply_stack() {
+  ui_info "Menerapkan perubahan (recreate container)..."
+  dc up -d >>"$LOG" 2>&1 && wait_web
+}
+
+fmt_cols() { awk -F'\t' '{ printf "%-22s %-28s %s\n", $1, $2, $3 }'; }
+
+# ---------------------------------------------------------------------------
+# 1. Status
+# ---------------------------------------------------------------------------
+status_text() {
+  local code nu nd nup pub
+  code=$(web_code)
+  pub=$(envget "$LENV" LIBRENMS_BASE_URL)
+  nu=$(echo "SELECT COUNT(*) FROM users;" | sqlq 2>/dev/null)
+  nd=$(echo "SELECT COUNT(*) FROM devices;" | sqlq 2>/dev/null)
+  nup=$(echo "SELECT COUNT(*) FROM devices WHERE status=1;" | sqlq 2>/dev/null)
+  echo "Folder instalasi : $DIR"
+  echo "URL lokal        : $(local_url)"
+  echo "URL publik       : ${pub:--}"
+  echo "Web UI           : $([[ $code == 200 || $code == 302 ]] && echo "OK (HTTP $code)" || echo "TIDAK MERESPONS (${code:-000})")"
+  echo "Jumlah user      : ${nu:-?}"
+  echo "Device up/total  : ${nup:-?}/${nd:-?}"
+  echo "Disk data / DB   : $(du -sh "$DIR/librenms" 2>/dev/null | cut -f1) / $(du -sh "$DIR/db" 2>/dev/null | cut -f1)"
+  echo "Zona waktu       : $(envget "$ENVF" TZ)"
+  echo
+  echo "Container:"
+  dc ps --format 'table {{.Service}}\t{{.Status}}' 2>/dev/null || dc ps
+  if [[ -f $INFO ]]; then echo; echo "----- INSTALL-INFO.txt -----"; cat "$INFO"; fi
+}
+
+# ---------------------------------------------------------------------------
+# 2. User
+# ---------------------------------------------------------------------------
+user_exists() { local n; n=$(printf "SELECT COUNT(*) FROM users WHERE username='%s';\n" "$(sql_esc "$1")" | sqlq 2>>"$LOG"); [[ $n =~ ^[1-9] ]]; }
+
+user_table() {
+  { printf 'USERNAME\tEMAIL\tDIBUAT\n'
+    echo "SELECT username, IFNULL(NULLIF(email,''),'-'), created_at FROM users ORDER BY user_id;" | sqlq
+  } | fmt_cols
+}
+
+pick_user() {
+  local __v=$1 title=$2 u sel items=() us=()
+  mapfile -t us < <(echo "SELECT username FROM users ORDER BY username;" | sqlq 2>>"$LOG")
+  ((${#us[@]})) || { ui_msg "User" "Belum ada user / database tidak bisa diakses."; return 1; }
+  for u in "${us[@]}"; do items+=("$u" ""); done
+  sel=$(ui_menu "$title" "Pilih user:" "${items[@]}") || return 1
+  printf -v "$__v" '%s' "$sel"
+}
+
+set_password() { # set_password user pass
+  local hash n eu; eu=$(sql_esc "$1")
+  hash=$(printf '%s' "$2" | dc exec -T librenms php -r 'echo password_hash(stream_get_contents(STDIN), PASSWORD_BCRYPT);' 2>>"$LOG")
+  [[ $hash == '$2y$'* ]] || { logf "Gagal membuat hash password"; return 1; }
+  n=$(printf "UPDATE users SET password='%s' WHERE username='%s'; SELECT ROW_COUNT();\n" "$hash" "$eu" | sqlq 2>>"$LOG")
+  [[ $n == 1 ]] || return 1
+  printf "UPDATE users SET remember_token=NULL WHERE username='%s';\n" "$eu" | sqlq >>"$LOG" 2>&1 || true
+}
+
+do_passwd() {
+  local u=${1:-} p
+  if [[ -z $u ]]; then pick_user u "Ganti Password" || return 0; fi
+  user_exists "$u" || { ui_msg "User tidak ditemukan" "User '$u' tidak ada.\nLihat daftar user di menu Akun Admin / User."; return 1; }
+  ui_pass p "Password baru untuk '$u'" 8 || return 0
+  ui_info "Mengganti password '$u'..."
+  if set_password "$u" "$p"; then
+    [[ $(info_get "Admin username   ") == "$u" ]] && info_set "Admin password   " "(diubah via gnclibre $(date +%F))"
+    logf "Password user $u diganti"
+    ui_msg "Berhasil" "Password user '$u' berhasil diganti.\nSilakan login ulang di Web UI."
+  else
+    ui_msg "Gagal" "Password gagal diganti. Detail: $LOG"; return 1
+  fi
+}
+
+do_rename() {
+  local old new n
+  pick_user old "Ganti Username" || return 0
+  ui_input new "Username baru" "Username baru untuk '$old':\n(3-32 karakter: huruf, angka, titik, '_' atau '-')" "$old" valid_username \
+    "Username 3-32 karakter: huruf, angka, titik, '_' atau '-'." || return 0
+  [[ $new == "$old" ]] && return 0
+  user_exists "$new" && { ui_msg "Sudah dipakai" "Username '$new' sudah ada."; return 1; }
+  n=$(printf "UPDATE users SET username='%s' WHERE username='%s'; SELECT ROW_COUNT();\n" "$(sql_esc "$new")" "$(sql_esc "$old")" | sqlq 2>>"$LOG")
+  if [[ $n == 1 ]]; then
+    [[ $(info_get "Admin username   ") == "$old" ]] && info_set "Admin username   " "$new"
+    logf "Username $old diganti menjadi $new"
+    ui_msg "Berhasil" "Username '$old' sekarang menjadi '$new'.\nPassword tidak berubah. Silakan login ulang."
+  else
+    ui_msg "Gagal" "Username gagal diganti. Detail: $LOG"; return 1
+  fi
+}
+
+do_adduser() {
+  local u r e p
+  ui_input u "Tambah User" "Username baru:" "" valid_username "Username 3-32 karakter: huruf, angka, titik, '_' atau '-'." || return 0
+  user_exists "$u" && { ui_msg "Sudah ada" "Username '$u' sudah ada."; return 1; }
+  r=$(ui_menu "Role" "Hak akses user '$u':" \
+    "admin"       "Administrator (akses penuh)" \
+    "global-read" "Lihat semua device (read-only)" \
+    "user"        "User biasa (hanya device yang diberikan)") || return 0
+  ui_input e "Tambah User" "Email user:" "$u@localhost" valid_email "Format email tidak valid." || return 0
+  ui_pass p "Password untuk '$u'" 8 || return 0
+  ui_run "Tambah user $u" lnms_c user:add --role="$r" --email="$e" --password="$p" "$u"
+  logf "Tambah user $u (role $r)"
+}
+
+m_users() {
+  local c
+  while true; do
+    c=$(ui_menu "Akun Admin / User" "Kelola akun login Web UI LibreNMS:" \
+      1 "Daftar user" 2 "Ganti password user" 3 "Ganti username" 4 "Tambah user baru" 0 "Kembali") || return 0
+    case $c in
+      1) ui_run "Daftar User" user_table ;;
+      2) do_passwd "" ;;
+      3) do_rename ;;
+      4) do_adduser ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 3. Akses Web
+# ---------------------------------------------------------------------------
+set_proxies() { envset "$LENV" APP_TRUSTED_PROXIES "$1"; [[ -f $DENV ]] && envset "$DENV" APP_TRUSTED_PROXIES "$1"; return 0; }
+
+proxy_https_ok() { # 0 = halaman tidak memuat http://host (tidak ada Mixed Content)
+  local host=${1#*://}; host=${host%%/*}
+  ! curl -s -m 10 -H "Host: $host" -H "X-Forwarded-Proto: https" -H "X-Forwarded-Host: $host" \
+      "http://127.0.0.1:$(web_port)/login" 2>/dev/null | grep -q "http://${host}"
+}
+
+do_public_url() {
+  local cur u res
+  cur=$(envget "$LENV" LIBRENMS_BASE_URL); cur=${cur%/}
+  ui_input u "URL Publik" "URL publik bila diakses lewat Cloudflare Tunnel / reverse proxy.\nContoh: https://nms.klien.com\n\nKosongkan untuk akses lokal saja: $(local_url)" \
+    "$cur" valid_public_url "Format salah. Contoh: https://nms.klien.com (tanpa path)" || return 0
+  u=${u%/}
+  if [[ -n $u ]]; then
+    envset "$LENV" LIBRENMS_BASE_URL "$u/"
+    [[ -n $(envget "$LENV" APP_TRUSTED_PROXIES) ]] || set_proxies "$DEFAULT_PROXIES"
+  else
+    envdel "$LENV" LIBRENMS_BASE_URL
+  fi
+  apply_stack || { ui_msg "Gagal" "Web UI tidak kembali normal. Cek: gnclibre logs"; return 1; }
+  lnms_c config:set base_url "${u:-$(local_url)}/" >>"$LOG" 2>&1
+  info_set "URL publik       " "${u:--}"
+  logf "URL publik diset ke ${u:-(kosong)}"
+  if [[ -z $u ]]; then
+    ui_msg "Berhasil" "URL publik dihapus. LibreNMS diakses lewat $(local_url)"
+    return 0
+  fi
+  if proxy_https_ok "$u"; then res="Cek HTTPS via proxy: OK (tanpa Mixed Content)"
+  else res="PERINGATAN: halaman masih memuat http://. Cek menu Trusted Proxy."; fi
+  ui_msg "Berhasil" "URL publik: $u\n$res\n\nDi Cloudflare Tunnel arahkan service hostname ini ke:\n  http://$(local_ip):$(web_port)" 15
+}
+
+do_proxies() {
+  local cur p
+  cur=$(envget "$LENV" APP_TRUSTED_PROXIES)
+  ui_input p "Trusted Proxy" "IP/CIDR reverse proxy (cloudflared) yang dipercaya, pisahkan koma.\nDefault: $DEFAULT_PROXIES" \
+    "${cur:-$DEFAULT_PROXIES}" valid_proxy_list "Isi IPv4/CIDR dipisah koma, contoh: 127.0.0.1,172.16.0.0/12" || return 0
+  set_proxies "$p"
+  apply_stack || { ui_msg "Gagal" "Web UI tidak kembali normal. Cek: gnclibre logs"; return 1; }
+  info_set "Trusted proxies  " "$p"
+  logf "Trusted proxies diset ke $p"
+  ui_msg "Berhasil" "Trusted proxy sekarang:\n$p"
+}
+
+do_port() {
+  local cur p
+  if ! grep -q '\${HTTP_PORT}' "$CF"; then
+    ui_msg "Tidak didukung" "File compose ini memakai port tetap (bukan buatan installer GNC).\nUbah port secara manual di:\n$CF" 12
+    return 1
+  fi
+  cur=$(web_port)
+  while true; do
+    ui_input p "Port Web" "Port HTTP Web UI LibreNMS (sekarang: $cur).\n80 = akses langsung http://IP tanpa menulis port." "$cur" valid_port "Port harus angka 1-65535." || return 0
+    [[ $p == "$cur" ]] && return 0
+    if [[ -n $(ss -Hltn "sport = :$p" 2>/dev/null) ]]; then ui_msg "Port dipakai" "Port $p sudah dipakai aplikasi lain."; continue; fi
+    break
+  done
+  envset "$ENVF" HTTP_PORT "$p"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then ufw allow "$p/tcp" >>"$LOG" 2>&1; fi
+  apply_stack || { ui_msg "Gagal" "Web UI tidak merespons di port $p. Cek: gnclibre logs"; return 1; }
+  info_set "URL Web UI       " "$(local_url)"
+  logf "Port web diubah $cur -> $p"
+  ui_msg "Berhasil" "Web UI sekarang di: $(local_url)\n\nBila memakai Cloudflare Tunnel, ubah juga service-nya ke port $p."
+}
+
+web_settings() {
+  echo "URL lokal        : $(local_url)"
+  echo "URL publik       : $(envget "$LENV" LIBRENMS_BASE_URL)"
+  echo "base_url (DB)    : $(lnms_c config:get base_url 2>/dev/null)"
+  echo "Trusted proxies  : $(envget "$LENV" APP_TRUSTED_PROXIES)"
+  echo "Port web         : $(web_port)"
+}
+
+m_web() {
+  local c
+  while true; do
+    c=$(ui_menu "Akses Web" "Pengaturan akses Web UI:" \
+      1 "Ubah URL publik (Cloudflare / domain)" 2 "Ubah trusted proxy" 3 "Ubah port web" 4 "Lihat setting saat ini" 0 "Kembali") || return 0
+    case $c in
+      1) do_public_url ;;
+      2) do_proxies ;;
+      3) do_port ;;
+      4) ui_run "Setting Akses Web" web_settings ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 4. SNMP & Device
+# ---------------------------------------------------------------------------
+default_community() { lnms_c config:get snmp.community 2>/dev/null | tr -d '[]" \r\n' | cut -d, -f1; }
+
+device_table() {
+  { printf 'HOSTNAME\tSYSNAME\tOS / STATUS\n'
+    echo "SELECT hostname, IFNULL(sysName,'-'), CONCAT(IFNULL(os,'-'), ' / ', IF(status=1,'up','DOWN')) FROM devices ORDER BY hostname;" | sqlq
+  } | fmt_cols
+}
+
+do_add_device() {
+  local h c f=()
+  ui_input h "Tambah Device" "IP address atau hostname device:" "" valid_host "IP/hostname tidak valid." || return 0
+  ui_input c "Tambah Device" "SNMP v2c community untuk $h:" "$(default_community)" valid_community \
+    "Community hanya huruf, angka, dan simbol ._@#%+=:- (tanpa spasi)." || return 0
+  ui_yesno "Force Add" "Tambahkan tanpa cek ping/SNMP (force add)?\n\nPilih 'No' (disarankan) agar LibreNMS memeriksa koneksi dulu." no && f=(--force)
+  ui_run "Tambah device $h" lnms_c device:add --v2c -c "$c" "${f[@]}" "$h"
+  logf "Tambah device $h"
+}
+
+do_community() {
+  local cur c ip
+  cur=$(default_community)
+  ui_input c "SNMP Community" "Community default untuk device baru & auto-discovery (sekarang: ${cur:-?}):" "$cur" valid_community \
+    "Community hanya huruf, angka, dan simbol ._@#%+=:- (tanpa spasi)." || return 0
+  [[ $c == "$cur" ]] && return 0
+  if ! lnms_c config:set snmp.community "[\"$c\"]" >>"$LOG" 2>&1; then ui_msg "Gagal" "Gagal menyimpan community. Detail: $LOG"; return 1; fi
+  info_set "SNMP community   " "$c"
+  if grep -q 'install-librenms.sh' /etc/snmp/snmpd.conf 2>/dev/null &&
+     ui_yesno "snmpd PC ini" "Ubah juga community snmpd di PC LibreNMS ini (monitoring diri sendiri)?"; then
+    sed -i "s/^\(rocommunity[[:space:]]\+\)[^[:space:]]\+/\1$c/" /etc/snmp/snmpd.conf
+    systemctl restart snmpd >>"$LOG" 2>&1
+    ip=$(local_ip)
+    printf "UPDATE devices SET community='%s' WHERE hostname IN ('%s','127.0.0.1','localhost');\n" "$c" "$ip" | sqlq >>"$LOG" 2>&1
+  fi
+  logf "Community default diubah"
+  ui_msg "Berhasil" "Community default sekarang: $c\n\nDevice yang sudah terdaftar tetap memakai community lamanya.\nUbah per device di Web UI: Device > Settings (gear) > SNMP." 13
+}
+
+do_dup_sysname() {
+  local cur
+  cur=$(lnms_c config:get allow_duplicate_sysName 2>/dev/null | tr -d '[:space:]')
+  if ui_yesno "sysName Duplikat" "Status sekarang: ${cur:-false}\n\nIzinkan beberapa device dengan sysName yang sama?\n(Perlu bila banyak switch masih memakai hostname default, mis. 'ruijie')"; then
+    lnms_c config:set allow_duplicate_sysName true >>"$LOG" 2>&1 && ui_msg "Berhasil" "sysName duplikat: DIIZINKAN"
+  else
+    lnms_c config:set allow_duplicate_sysName false >>"$LOG" 2>&1 && ui_msg "Berhasil" "sysName duplikat: TIDAK diizinkan"
+  fi
+}
+
+m_snmp() {
+  local c
+  while true; do
+    c=$(ui_menu "SNMP & Device" "Kelola device yang dimonitor:" \
+      1 "Daftar device" 2 "Tambah device (SNMP v2c)" 3 "Ubah community default" 4 "Izinkan sysName duplikat (on/off)" 0 "Kembali") || return 0
+    case $c in
+      1) ui_run "Daftar Device" device_table ;;
+      2) do_add_device ;;
+      3) do_community ;;
+      4) do_dup_sysname ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 5. Email (SMTP relay via msmtpd)
+# ---------------------------------------------------------------------------
+ensure_msmtpd() {
+  has_service msmtpd && return 0
+  if ! grep -q 'install-librenms.sh' "$CF"; then
+    ui_msg "Tidak didukung" "Service msmtpd tidak ada di $CF.\nTambahkan service msmtpd secara manual." 11; return 1
+  fi
+  cp -p "$CF" "$CF.bak"
+  cat >>"$CF" <<'EOF'
+
+  msmtpd:
+    image: crazymax/msmtpd:latest
+    container_name: librenms_msmtpd
+    env_file:
+      - "./msmtpd.env"
+    restart: always
+EOF
+  dc config -q >>"$LOG" 2>&1 && return 0
+  cp -p "$CF.bak" "$CF"
+  ui_msg "Gagal" "Gagal menambahkan service msmtpd ke compose. Detail: $LOG"; return 1
+}
+
+do_smtp() {
+  local h p u pw f tls=on
+  h=$(envget "$MENV" SMTP_HOST); p=$(envget "$MENV" SMTP_PORT); u=$(envget "$MENV" SMTP_USER); f=$(envget "$MENV" SMTP_FROM)
+  ui_input h "Email Alert" "SMTP server:" "${h:-smtp.gmail.com}" valid_host "Host SMTP tidak valid." || return 0
+  ui_input p "Email Alert" "Port SMTP (587 = STARTTLS, 465 = SSL/TLS):" "${p:-587}" valid_port "Port harus angka 1-65535." || return 0
+  ui_input u "Email Alert" "Username SMTP (biasanya alamat email):" "$u" valid_nonempty "Username tidak boleh kosong." || return 0
+  ui_pass pw "Password SMTP (Gmail: App Password)" 1 valid_safe_pass "Password tidak boleh mengandung tanda kutip tunggal (')." || return 0
+  ui_input f "Email Alert" "Alamat pengirim (From):" "${f:-$u}" valid_email "Format email tidak valid." || return 0
+  [[ $p == 465 ]] && tls=off
+  [[ -f $MENV ]] || { touch "$MENV"; chmod 600 "$MENV"; }
+  cat >"$MENV" <<EOF
+SMTP_HOST=${h}
+SMTP_PORT=${p}
+SMTP_TLS=on
+SMTP_STARTTLS=${tls}
+SMTP_TLS_CHECKCERT=on
+SMTP_AUTH=on
+SMTP_USER=${u}
+SMTP_PASSWORD='${pw}'
+SMTP_FROM=${f}
+EOF
+  chmod 600 "$MENV"
+  ensure_msmtpd || return 1
+  apply_stack || { ui_msg "Gagal" "Container tidak kembali normal. Cek: gnclibre logs"; return 1; }
+  if lnms_c config:set email_backend smtp >>"$LOG" 2>&1 &&
+     lnms_c config:set email_smtp_host msmtpd >>"$LOG" 2>&1 &&
+     lnms_c config:set email_smtp_port 2500 >>"$LOG" 2>&1 &&
+     lnms_c config:set email_smtp_auth false >>"$LOG" 2>&1 &&
+     lnms_c config:set email_from "$f" >>"$LOG" 2>&1; then
+    logf "SMTP diatur ke $h:$p"
+    ui_msg "Berhasil" "Email alert dikirim lewat $h:$p sebagai $f.\n\nUji kirim: Web UI > Alerts > Alert Transports > buat transport Mail > Test." 12
+  else
+    ui_msg "Gagal" "Sebagian setting email gagal disimpan. Detail: $LOG"; return 1
+  fi
+}
+
+mail_settings() {
+  if [[ -f $MENV ]]; then grep -v '^SMTP_PASSWORD' "$MENV"; echo "SMTP_PASSWORD=********"; else echo "msmtpd.env belum ada (SMTP belum diatur)."; fi
+  echo; echo "email_backend : $(lnms_c config:get email_backend 2>/dev/null)"
+  echo "email_from    : $(lnms_c config:get email_from 2>/dev/null)"
+}
+
+m_mail() {
+  local c
+  while true; do
+    c=$(ui_menu "Email Alert" "Pengiriman email notifikasi alert:" 1 "Atur / ubah SMTP" 2 "Lihat setting email" 0 "Kembali") || return 0
+    case $c in 1) do_smtp ;; 2) ui_run "Setting Email" mail_settings ;; 0) return 0 ;; esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 6. Zona waktu
+# ---------------------------------------------------------------------------
+m_tz() {
+  local cur tz
+  cur=$(envget "$ENVF" TZ)
+  tz=$(ui_menu "Zona Waktu" "Zona waktu sekarang: ${cur:-?}" \
+    "Asia/Jakarta" "WIB  (UTC+7)" "Asia/Makassar" "WITA (UTC+8)" "Asia/Jayapura" "WIT  (UTC+9)" \
+    "UTC" "UTC" "lainnya" "Ketik manual (mis. Asia/Singapore)") || return 0
+  if [[ $tz == lainnya ]]; then
+    ui_input tz "Zona Waktu" "Nama zona waktu (Region/Kota):" "$cur" valid_tz "Zona waktu tidak ditemukan. Contoh: Asia/Singapore" || return 0
+  fi
+  [[ $tz == "$cur" ]] && return 0
+  envset "$ENVF" TZ "$tz"
+  timedatectl set-timezone "$tz" >>"$LOG" 2>&1 || ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+  apply_stack || { ui_msg "Gagal" "Container tidak kembali normal. Cek: gnclibre logs"; return 1; }
+  info_set "Zona waktu       " "$tz"
+  logf "Zona waktu diubah ke $tz"
+  ui_msg "Berhasil" "Zona waktu sekarang: $tz"
+}
+
+# ---------------------------------------------------------------------------
+# 7. Layanan
+# ---------------------------------------------------------------------------
+do_update() {
+  local f
+  ui_info "Backup database sebelum update..."
+  f=$(backup_db) || { ui_msg "Gagal" "Backup database gagal, update dibatalkan. Detail: $LOG"; return 1; }
+  ui_info "Download image terbaru (bisa beberapa menit)..."
+  dc pull >>"$LOG" 2>&1 || { ui_msg "Gagal" "Download image gagal. Cek koneksi internet. Detail: $LOG"; return 1; }
+  ui_info "Menjalankan versi baru & migrasi database..."
+  dc up -d >>"$LOG" 2>&1 && wait_web || { ui_msg "Gagal" "LibreNMS belum merespons setelah update. Cek: gnclibre logs\nBackup DB: $f"; return 1; }
+  docker image prune -f >>"$LOG" 2>&1
+  logf "Update selesai (backup $f)"
+  ui_msg "Berhasil" "LibreNMS sudah diupdate.\nBackup database sebelum update:\n$f"
+}
+
+m_service() {
+  local c s items=()
+  while true; do
+    c=$(ui_menu "Layanan" "Kontrol container LibreNMS:" \
+      1 "Restart semua" 2 "Restart Web UI saja" 3 "Stop semua" 4 "Start semua" \
+      5 "Lihat log" 6 "Validasi LibreNMS (validate.php)" 7 "Update LibreNMS ke image terbaru" 0 "Kembali") || return 0
+    case $c in
+      1) ui_info "Restart semua container..."; dc restart >>"$LOG" 2>&1 && wait_web && ui_msg "Berhasil" "Semua container sudah di-restart." || ui_msg "Gagal" "Cek: gnclibre logs" ;;
+      2) ui_info "Restart Web UI..."; dc restart librenms >>"$LOG" 2>&1 && wait_web && ui_msg "Berhasil" "Web UI sudah di-restart." || ui_msg "Gagal" "Cek: gnclibre logs" ;;
+      3) ui_yesno "Stop" "Hentikan semua container? Monitoring akan berhenti." no && { ui_info "Menghentikan container..."; dc stop >>"$LOG" 2>&1; ui_msg "Selesai" "Semua container dihentikan. Jalankan lagi lewat menu Start semua."; } ;;
+      4) ui_info "Menjalankan container..."; dc up -d >>"$LOG" 2>&1 && wait_web && ui_msg "Berhasil" "Semua container berjalan." || ui_msg "Gagal" "Cek: gnclibre logs" ;;
+      5) items=(); while read -r s; do [[ -n $s ]] && items+=("$s" ""); done < <(services)
+         s=$(ui_menu "Lihat Log" "Pilih container:" "${items[@]}") && ui_run "Log $s (200 baris terakhir)" dc logs --no-color --tail 200 "$s" ;;
+      6) ui_run "Validasi LibreNMS" dc exec -T --user librenms librenms php validate.php ;;
+      7) ui_yesno "Update" "Update LibreNMS ke image terbaru?\n\nDatabase akan dibackup otomatis dulu. Web UI tidak bisa diakses 1-3 menit." no && do_update ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# 8. Backup & Restore
+# ---------------------------------------------------------------------------
+backup_db() { # tulis path file ke stdout
+  local f
+  mkdir -p "$BK"; chmod 700 "$BK"
+  f=$BK/librenms-db-$(date +%Y%m%d-%H%M%S).sql.gz
+  if dc exec -T db sh -c 'exec mariadb-dump --single-transaction --quick -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' 2>>"$LOG" | gzip >"$f" &&
+     zcat "$f" | grep -q 'CREATE TABLE'; then
+    chmod 600 "$f"; logf "Backup DB: $f"; echo "$f"; return 0
+  fi
+  rm -f "$f"; logf "Backup DB gagal"; return 1
+}
+
+backup_full() {
+  local db t items=() i
+  db=$(backup_db) || return 1
+  t=$BK/librenms-files-$(date +%Y%m%d-%H%M%S).tar.gz
+  for i in librenms .env librenms.env msmtpd.env "$(basename "$CF")" INSTALL-INFO.txt; do [[ -e $DIR/$i ]] && items+=("$i"); done
+  tar -czf "$t" -C "$DIR" --exclude='librenms/logs' "${items[@]}" 2>>"$LOG" || { rm -f "$t"; return 1; }
+  chmod 600 "$t"; logf "Backup file: $t"
+  printf '%s\n%s\n' "$db" "$t"
+}
+
+backup_list() {
+  if compgen -G "$BK/*" >/dev/null; then ls -lh --time-style='+%Y-%m-%d %H:%M' "$BK" | awk 'NR>1 {print $6" "$7"  "$5"  "$8}'
+  else echo "Belum ada backup di $BK"; fi
+  echo; echo "Folder: $BK"
+}
+
+do_restore() {
+  local files=() items=() f sel conf pre svc stop=()
+  mapfile -t files < <(ls -1t "$BK"/librenms-db-*.sql.gz 2>/dev/null)
+  ((${#files[@]})) || { ui_msg "Restore" "Belum ada file backup database di $BK"; return 1; }
+  for f in "${files[@]}"; do items+=("$(basename "$f")" "$(du -h "$f" | cut -f1)"); done
+  sel=$(ui_menu "Restore Database" "Pilih backup (terbaru di atas):" "${items[@]}") || return 0
+  ui_input conf "Konfirmasi Restore" "Database LibreNMS sekarang akan DIGANTI dengan:\n$sel\n\nDatabase saat ini dibackup otomatis dulu.\nKetik RESTORE untuk melanjutkan:" "" || return 0
+  [[ $conf == RESTORE ]] || { ui_msg "Dibatalkan" "Restore dibatalkan."; return 0; }
+  ui_info "Backup database saat ini..."
+  pre=$(backup_db) || { ui_msg "Gagal" "Backup database saat ini gagal, restore dibatalkan."; return 1; }
+  while read -r svc; do [[ $svc =~ ^(db|redis|librenms|msmtpd)$ || -z $svc ]] || stop+=("$svc"); done < <(services)
+  ui_info "Menghentikan poller & restore database..."
+  ((${#stop[@]})) && dc stop "${stop[@]}" >>"$LOG" 2>&1
+  if zcat "$BK/$sel" | sqlq >>"$LOG" 2>&1; then
+    dc restart librenms >>"$LOG" 2>&1; dc up -d >>"$LOG" 2>&1; wait_web
+    logf "Restore DB dari $sel (backup sebelum restore: $pre)"
+    ui_msg "Berhasil" "Database dipulihkan dari $sel.\n\nBackup sebelum restore:\n$pre"
+  else
+    dc up -d >>"$LOG" 2>&1
+    ui_msg "Gagal" "Restore gagal. Database sebelumnya ada di:\n$pre\nDetail: $LOG"; return 1
+  fi
+}
+
+m_backup() {
+  local c out
+  while true; do
+    c=$(ui_menu "Backup & Restore" "Backup disimpan di $BK" \
+      1 "Backup database (cepat)" 2 "Backup lengkap (database + grafik RRD + config)" 3 "Restore database" 4 "Daftar backup" 0 "Kembali") || return 0
+    case $c in
+      1) ui_info "Backup database..."; if out=$(backup_db); then ui_msg "Berhasil" "Backup database:\n$out"; else ui_msg "Gagal" "Backup gagal. Detail: $LOG"; fi ;;
+      2) ui_info "Backup lengkap (bisa beberapa menit)..."; if out=$(backup_full); then ui_msg "Berhasil" "Backup tersimpan:\n$out" 12; else ui_msg "Gagal" "Backup gagal. Detail: $LOG"; fi ;;
+      3) do_restore ;;
+      4) ui_run "Daftar Backup" backup_list ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Menu utama
+# ---------------------------------------------------------------------------
+main_menu() {
+  local c code st
+  while true; do
+    code=$(web_code)
+    if [[ $code == 200 || $code == 302 ]]; then st="Web UI: OK"; else st="Web UI: TIDAK MERESPONS"; fi
+    c=$(ui_menu "Menu Utama" "LibreNMS di $(local_url)   |   $st\n\nPilih menu:" \
+      1 "Status & informasi" \
+      2 "Akun admin / user (password, username)" \
+      3 "Akses web (URL publik, proxy, port)" \
+      4 "SNMP & device" \
+      5 "Email alert (SMTP)" \
+      6 "Zona waktu" \
+      7 "Layanan (restart, log, update)" \
+      8 "Backup & restore" \
+      0 "Keluar") || return 0
+    case $c in
+      1) ui_run "Status LibreNMS" status_text ;;
+      2) m_users ;;
+      3) m_web ;;
+      4) m_snmp ;;
+      5) m_mail ;;
+      6) m_tz ;;
+      7) m_service ;;
+      8) m_backup ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+self_update() {
+  local tmp new self
+  self=$(readlink -f "$0")
+  tmp=$(mktemp)
+  say "Mengunduh gnclibre terbaru dari $REPO_RAW ..."
+  if command -v curl >/dev/null 2>&1; then curl -fsSL -m 60 "$REPO_RAW/gnclibre" -o "$tmp"
+  else wget -qO "$tmp" "$REPO_RAW/gnclibre"; fi || { rm -f "$tmp"; die "Gagal mengunduh. Cek koneksi internet."; }
+  new=$(grep -m1 -o 'GNCLIBRE_VERSION="[^"]*"' "$tmp" | cut -d'"' -f2)
+  if [[ -z $new ]] || ! bash -n "$tmp" 2>/dev/null; then rm -f "$tmp"; die "File unduhan tidak valid, gnclibre tidak diubah."; fi
+  if [[ $new == "$GNCLIBRE_VERSION" ]]; then rm -f "$tmp"; okp "gnclibre sudah versi terbaru ($new)."; return 0; fi
+  install -m 755 "$tmp" "$self" && rm -f "$tmp" || die "Gagal menulis $self"
+  logf "self-update $GNCLIBRE_VERSION -> $new"
+  okp "gnclibre diperbarui: $GNCLIBRE_VERSION -> $new"
+}
+
+main() {
+  local cmd=${1:-menu} f
+  case $cmd in
+    -h|--help|help) show_banner; usage; return 0 ;;
+    -v|--version|version) echo "gnclibre $GNCLIBRE_VERSION"; return 0 ;;
+    menu|status|passwd|restart|update|backup|logs|validate|self-update) ;;
+    *) usage; return 1 ;;
+  esac
+  need_root "$@"
+  touch "$LOG" 2>/dev/null && chmod 600 "$LOG" 2>/dev/null
+  [[ $cmd == self-update ]] && { self_update; return; }
+  command -v docker >/dev/null 2>&1 || die "Docker tidak ditemukan."
+  load_env
+  case $cmd in
+    menu)     ensure_whiptail; TUI=1; main_menu; clear; show_banner; okp "Sampai jumpa." ;;
+    status)   show_banner; status_text ;;
+    passwd)   ensure_whiptail; TUI=1; do_passwd "${2:-admin}"; local rc=$?; clear; return $rc ;;
+    restart)  say "Restart semua container..."; dc restart && wait_web && okp "Web UI siap: $(local_url)" ;;
+    update)   do_update ;;
+    backup)   say "Backup database..."; if f=$(backup_db); then okp "Backup: $f"; else die "Backup gagal (lihat $LOG)"; fi ;;
+    logs)     dc logs -f --tail 100 "${2:-librenms}" ;;
+    validate) dc exec -T --user librenms librenms php validate.php ;;
+  esac
+}
+
+main "$@"
