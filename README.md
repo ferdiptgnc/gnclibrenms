@@ -42,8 +42,12 @@ Setelah selesai, buka `http://IP-PC` (atau `http://IP-PC:PORT` kalau port bukan 
 | Email admin | `admin@localhost` | dipakai juga sebagai sysContact |
 | Password database | generate otomatis | |
 | SNMP community | `public` | **disarankan diganti** |
-| Komponen tambahan | syslog ✓, trap ✓, monitor PC ini ✓, SMTP ✗, sysName duplikat ✓, branding GNC ✓ | sysName duplikat perlu untuk banyak switch dengan hostname default (mis. Ruijie `ruijie`) |
+| Komponen tambahan | syslog ✓, trap ✓, monitor PC ini ✓, SMTP ✗, sysName duplikat ✓, branding GNC ✓, Grafana + SLA ✓, backup konfigurasi ✓ | sysName duplikat perlu untuk banyak switch dengan hostname default (mis. Ruijie `ruijie`) |
 | Lokasi (sysLocation) | `Kantor Klien` | |
+| Target ping SLA | gateway lokal, `1.1.1.1`, `8.8.8.8` | ditambah gateway ISP bila tahu |
+| Interval speedtest | `4h` | `1h` / `2h` / `4h` / `6h` / `off` |
+| Port Grafana | `3000` | URL publik Grafana (Cloudflare) opsional |
+| User SSH perangkat | `oxidized` | untuk backup konfigurasi; kosongkan untuk melewati |
 | Folder instalasi | `/opt/librenms` | |
 | PHP memory limit | `256M` | |
 
@@ -86,6 +90,7 @@ Menu yang tersedia:
 | Layanan | restart, stop/start, lihat log, `validate.php`, update ke image terbaru (DB dibackup dulu) |
 | Backup & restore | backup database, backup lengkap (DB + grafik RRD + config), restore database |
 | Branding | terapkan logo/favicon/judul/pesan login GNC, ubah judul & pesan, pakai logo sendiri (PNG), kembalikan tampilan asli |
+| Modul analisis | backup konfigurasi (Oxidized), Grafana + SLA ISP: aktifkan/ubah, backup & speedtest manual, cek data, reset password Grafana, nonaktifkan |
 
 Perintah langsung tanpa menu (bisa dipakai di script):
 
@@ -99,6 +104,10 @@ gnclibre logs [service]   # ikuti log (default: librenms)
 gnclibre validate         # jalankan validate.php
 gnclibre branding         # terapkan branding GNC
 gnclibre branding reset   # kembalikan tampilan asli LibreNMS
+gnclibre module analytics # aktifkan Grafana + SLA ISP
+gnclibre module oxidized  # aktifkan backup konfigurasi (GNC_OXI_USER=.. GNC_OXI_PASS=..)
+gnclibre backup-config    # backup konfigurasi semua device sekarang
+gnclibre speedtest        # speedtest sekarang
 gnclibre self-update      # perbarui gnclibre dari repo ini
 ```
 
@@ -128,6 +137,47 @@ Secara default installer memasang identitas GNC di Web UI:
 File logo ada di `/opt/librenms/branding/` dan di-mount ke container lewat `compose.override.yml`, jadi logo tetap ada setelah update atau recreate container. File override ini otomatis dimuat saat `docker compose` dijalankan di folder instalasi.
 
 Server lama cukup menjalankan `gnclibre self-update`, lalu `gnclibre branding`. Logo milik klien bisa dipasang lewat menu `gnclibre` → Branding → Pakai logo sendiri.
+
+## Modul analisis (Tahap 1)
+
+Dua modul tambahan, dipasang otomatis oleh installer atau lewat `gnclibre` → **10 Modul analisis**.
+
+### Grafana + SLA ISP
+
+Komponennya: InfluxDB 2.7 (penyimpanan 90 hari), Telegraf, dan Grafana. Setelah aktif, Grafana bisa dibuka di `http://IP-PC:3000` (user `admin`). Ada tiga dashboard di folder **GNC**:
+
+| Dashboard | Isi |
+|---|---|
+| **GNC - Ringkasan Jaringan** | jumlah device up/down, alert aktif, port ber-error, daftar device (klik untuk membuka LibreNMS) |
+| **GNC - Kualitas ISP (SLA)** | latency, packet loss, jitter per target ping setiap menit, serta speedtest download/upload berkala |
+| **GNC - Trafik WAN** | trafik semua port berlabel `Transit:`, persentil-95, volume, dan error WAN, ditambah grafik port pilihan |
+
+Data trafik WAN berasal dari LibreNMS, yang otomatis mengirim metrik ke InfluxDB. Port WAN ditandai dengan deskripsi interface `Transit: NamaISP {100Mbps}`.
+
+Untuk akses lewat Cloudflare Tunnel, buat hostname terpisah (misalnya `grafana.klien.gnclab.online`) yang diarahkan ke `http://IP-PC:3000`, lalu isi URL publiknya di dialog atau di menu.
+
+Setiap speedtest memakai bandwidth ratusan MB pada link cepat, jadi pilih intervalnya dengan wajar (default 4 jam).
+
+### Backup konfigurasi (Oxidized)
+
+Konfigurasi setiap device di LibreNMS dibackup otomatis setiap 24 jam lewat SSH. Riwayat dan diff-nya bisa dilihat di LibreNMS → device → tab **Config**. Secret (password, community) dibuang dari hasil backup.
+
+Siapkan user SSH khusus di perangkat:
+
+```
+# MikroTik
+/user add name=oxidized group=read password=PASSWORD
+# Ruijie (butuh privilege 15 agar show running-config bisa dibaca)
+username oxidized privilege 15 password PASSWORD
+line vty 0 4
+ login local
+```
+
+Kalau Ruijie memakai kredensial berbeda, isi lewat `gnclibre` → Modul analisis → Backup konfigurasi.
+
+### Kebutuhan sumber daya
+
+Dengan kedua modul aktif: RAM minimal **4 GB** (8 GB disarankan) dan disk kosong **20 GB**. Image tambahan berukuran ±1,5 GB.
 
 ## Akses lewat Cloudflare Tunnel
 

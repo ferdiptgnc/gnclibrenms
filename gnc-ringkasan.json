@@ -1,0 +1,674 @@
+{
+ "uid": "gnc-ringkasan",
+ "title": "GNC - Ringkasan Jaringan",
+ "description": "Status device, alert aktif, dan port bermasalah dari LibreNMS",
+ "tags": [
+  "gnc"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "refresh": "1m",
+ "schemaVersion": 39,
+ "version": 1,
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "links": [
+  {
+   "title": "Ringkasan",
+   "url": "/d/gnc-ringkasan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Kualitas ISP",
+   "url": "/d/gnc-sla",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Trafik WAN",
+   "url": "/d/gnc-wan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "LibreNMS",
+   "url": "__LNMS_URL__",
+   "type": "link",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Total device",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS total FROM devices WHERE `ignore` = 0 AND disabled = 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Device UP",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 5,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS up FROM devices WHERE status = 1 AND `ignore` = 0 AND disabled = 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Device DOWN",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 10,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS down FROM devices WHERE status = 0 AND `ignore` = 0 AND disabled = 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Alert aktif",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 15,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS alert FROM alerts WHERE state != 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Port ber-error",
+   "description": "Port yang mencatat error pada polling terakhir (flag merah di LibreNMS)",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS port FROM ports WHERE deleted = 0 AND (ifInErrors_rate > 0 OR ifOutErrors_rate > 0)",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "table",
+   "title": "Device DOWN",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT device_id, hostname AS Device, IFNULL(sysName, '') AS sysName, IFNULL(status_reason, '') AS Penyebab, last_polled AS `Terakhir dipoll` FROM devices WHERE status = 0 AND `ignore` = 0 AND disabled = 0 ORDER BY hostname",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "table",
+   "title": "Alert aktif",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT d.device_id, a.timestamp AS Waktu, d.hostname AS Device, r.name AS Alert, r.severity AS Severity, CASE a.state WHEN 1 THEN 'Alert' WHEN 2 THEN 'Ack' WHEN 3 THEN 'Memburuk' WHEN 4 THEN 'Membaik' ELSE a.state END AS Status FROM alerts a JOIN devices d ON d.device_id = a.device_id JOIN alert_rules r ON r.id = a.rule_id WHERE a.state != 0 ORDER BY a.timestamp DESC LIMIT 50",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "table",
+   "title": "Port dengan error (polling terakhir)",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT d.device_id, d.hostname AS Device, p.ifName AS Port, IFNULL(p.ifAlias, '') AS Deskripsi, ROUND(p.ifInErrors_rate, 3) AS `Error in/dtk`, ROUND(p.ifOutErrors_rate, 3) AS `Error out/dtk` FROM ports p JOIN devices d ON d.device_id = p.device_id WHERE p.deleted = 0 AND (p.ifInErrors_rate > 0 OR p.ifOutErrors_rate > 0) ORDER BY p.ifInErrors_rate + p.ifOutErrors_rate DESC LIMIT 30",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "table",
+   "title": "Daftar device",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 13,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT d.device_id, d.hostname AS Device, IFNULL(d.sysName, '') AS sysName, d.os AS OS, IFNULL(d.hardware, '') AS Hardware, IFNULL(l.location, '') AS Lokasi, IF(d.status = 1, 'UP', 'DOWN') AS Status FROM devices d LEFT JOIN locations l ON l.id = d.location_id WHERE d.`ignore` = 0 AND d.disabled = 0 ORDER BY d.hostname",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  }
+ ]
+}

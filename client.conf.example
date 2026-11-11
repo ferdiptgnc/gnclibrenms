@@ -27,6 +27,18 @@ LNMS_ENABLE_TRAP="yes"
 LNMS_MONITOR_SELF="yes"
 LNMS_ALLOW_DUP_SYSNAME="yes"        # izinkan banyak device dengan sysName sama
 
+# --- Grafana + SLA ISP ---
+LNMS_MOD_ANALYTICS="yes"
+LNMS_SLA_TARGETS=""                # kosong = gateway lokal + 1.1.1.1 + 8.8.8.8
+LNMS_SPEEDTEST_INTERVAL="4h"       # 1h | 2h | 4h | 6h | off
+LNMS_GRAFANA_PORT="3000"
+LNMS_GRAFANA_PASS=""               # kosong = sama dengan password admin LibreNMS
+LNMS_GRAFANA_URL=""                # mis. "https://grafana.klien-a.co.id" (Cloudflare)
+
+# --- Backup konfigurasi perangkat (Oxidized) ---
+LNMS_OXI_USER=""                   # isi untuk mengaktifkan, mis. "oxidized"
+LNMS_OXI_PASS=""
+
 # --- Branding Web UI ---
 LNMS_BRANDING="yes"                # logo GNC, favicon, judul & pesan login
 LNMS_BRAND_TITLE="GNC NMS - Klien A"

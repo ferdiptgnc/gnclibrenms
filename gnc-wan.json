@@ -1,0 +1,538 @@
+{
+ "uid": "gnc-wan",
+ "title": "GNC - Trafik WAN",
+ "description": "Trafik port WAN (deskripsi interface diawali 'Transit:') dari LibreNMS",
+ "tags": [
+  "gnc"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "refresh": "5m",
+ "schemaVersion": 39,
+ "version": 1,
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "links": [
+  {
+   "title": "Ringkasan",
+   "url": "/d/gnc-ringkasan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Kualitas ISP",
+   "url": "/d/gnc-sla",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Trafik WAN",
+   "url": "/d/gnc-wan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "LibreNMS",
+   "url": "__LNMS_URL__",
+   "type": "link",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": [
+   {
+    "type": "query",
+    "name": "host",
+    "label": "Device",
+    "datasource": {
+     "type": "influxdb",
+     "uid": "gnc-influx"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false,
+    "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"gnc\", tag: \"hostname\", predicate: (r) => r._measurement == \"ports\", start: -30d)"
+   },
+   {
+    "type": "query",
+    "name": "port",
+    "label": "Port",
+    "datasource": {
+     "type": "influxdb",
+     "uid": "gnc-influx"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false,
+    "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"gnc\", tag: \"ifName\", predicate: (r) => r._measurement == \"ports\" and r.hostname == \"${host}\", start: -30d)"
+   }
+  ]
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "timeseries",
+   "title": "Trafik semua port WAN (Transit)",
+   "description": "Port dengan deskripsi 'Transit: ...'. Kosong? Lihat panel petunjuk di bawah.",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.ifName} ${__field.labels.arah} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"In\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"Out\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Persentil-95 masuk",
+   "description": "Nilai 95th percentile, umum dipakai untuk billing bandwidth",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> quantile(q: 0.95, method: \"estimate_tdigest\")"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Persentil-95 keluar",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 6,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> quantile(q: 0.95, method: \"estimate_tdigest\")"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Volume masuk (periode)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "decbytes",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> integral(unit: 1s)\n  |> map(fn: (r) => ({r with _value: r._value / 8.0}))"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Volume keluar (periode)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "decbytes",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> integral(unit: 1s)\n  |> map(fn: (r) => ({r with _value: r._value / 8.0}))"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "Error port WAN (per detik)",
+   "description": "Error berulang di WAN biasanya kabel/konektor/ONT (lihat juga flag merah di LibreNMS)",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.ifName} ${__field.labels.arah} (${__field.labels.hostname})",
+     "decimals": 3
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInErrors_rate\")\n  |> map(fn: (r) => ({r with arah: \"In\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutErrors_rate\")\n  |> map(fn: (r) => ({r with arah: \"Out\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "text",
+   "title": "Petunjuk: menandai port WAN",
+   "gridPos": {
+    "x": 12,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "Panel WAN membaca port yang **deskripsinya diawali `Transit:`**.\n\n**Ruijie**\n```\ninterface GigabitEthernet 0/1\n description Transit: Telkom-Astinet {100Mbps}\n```\n**MikroTik**\n```\n/interface ethernet set ether1 comment=\"Transit: Telkom-Astinet {100Mbps}\"\n```\nData muncul setelah polling berikutnya (±5 menit). Port mana pun tetap bisa dilihat lewat pilihan **Device** & **Port** di atas (panel bawah)."
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Port terpilih: ${port} (${host})",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 22,
+    "w": 24,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.arah}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.hostname == \"${host}\" and r.ifName == \"${port}\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"In\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.hostname == \"${host}\" and r.ifName == \"${port}\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"Out\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  }
+ ]
+}

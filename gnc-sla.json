@@ -1,0 +1,752 @@
+{
+ "uid": "gnc-sla",
+ "title": "GNC - Kualitas ISP (SLA)",
+ "description": "Latency, packet loss, jitter, dan speedtest berkala dari PC LibreNMS (Telegraf)",
+ "tags": [
+  "gnc"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "refresh": "1m",
+ "schemaVersion": 39,
+ "version": 1,
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "links": [
+  {
+   "title": "Ringkasan",
+   "url": "/d/gnc-ringkasan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Kualitas ISP",
+   "url": "/d/gnc-sla",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Trafik WAN",
+   "url": "/d/gnc-wan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "LibreNMS",
+   "url": "__LNMS_URL__",
+   "type": "link",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Paket sampai (rata-rata periode)",
+   "description": "100% dikurangi rata-rata packet loss per target selama periode yang dipilih",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 99
+       },
+       {
+        "color": "green",
+        "value": 99.9
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.url}",
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"percent_packet_loss\")\n  |> group(columns: [\"url\"])\n  |> mean()\n  |> map(fn: (r) => ({r with _value: 100.0 - r._value}))"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Latency rata-rata",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 12,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 50
+       },
+       {
+        "color": "red",
+        "value": 150
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.url}",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"average_response_ms\")\n  |> group(columns: [\"url\"])\n  |> mean()"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "Latency (ms)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"average_response_ms\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Packet loss (%)",
+   "description": "Nilai maksimum per jendela waktu agar lonjakan loss tidak tersamarkan",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 5,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"percent_packet_loss\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "Jitter / deviasi latency (ms)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"standard_deviation_ms\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "Latency maksimum (ms)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 13,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"maximum_response_ms\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Download terakhir",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Download",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"download\")\n  |> group(columns: [\"_measurement\"])\n  |> last()"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "stat",
+   "title": "Upload terakhir",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 6,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Upload",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"upload\")\n  |> group(columns: [\"_measurement\"])\n  |> last()"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "stat",
+   "title": "Download rata-rata",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Download",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"download\")\n  |> group(columns: [\"_measurement\"])\n  |> mean()"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "stat",
+   "title": "Upload rata-rata",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Upload",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"upload\")\n  |> group(columns: [\"_measurement\"])\n  |> mean()"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Speedtest download & upload (Mbps)",
+   "description": "Satu titik per speedtest (default setiap 4 jam)",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 16,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "always",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.arah}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"download\")\n  |> group(columns: [\"_measurement\"])\n  |> map(fn: (r) => ({r with arah: \"Download\"}))\n  |> group(columns: [\"arah\"])"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"upload\")\n  |> group(columns: [\"_measurement\"])\n  |> map(fn: (r) => ({r with arah: \"Upload\"}))\n  |> group(columns: [\"arah\"])"
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "type": "text",
+   "title": "Cara membaca",
+   "gridPos": {
+    "x": 16,
+    "y": 26,
+    "w": 8,
+    "h": 8
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**Target ping** diatur lewat `gnclibre` → Modul Analisis → Analitik & SLA.\n\n- **Paket sampai < 99,9%** atau **loss > 1%** berulang → indikasi gangguan link/ISP.\n- **Latency lokal (router) tinggi** → masalah di LAN/router, bukan ISP.\n- **Latency 1.1.1.1 / 8.8.8.8 tinggi, router normal** → masalah di sisi ISP.\n- **Speedtest** jauh di bawah paket berlangganan secara konsisten → bukti untuk komplain ISP.\n\nEkspor grafik: menu panel → *Share* → *Export* / *Snapshot*."
+   }
+  }
+ ]
+}

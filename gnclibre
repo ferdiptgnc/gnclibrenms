@@ -16,6 +16,9 @@
 #    gnclibre logs [service]   ikuti log container (default: librenms)
 #    gnclibre validate         jalankan validate.php
 #    gnclibre branding [reset] terapkan / kembalikan branding GNC
+#    gnclibre module <oxidized|analytics> [off]   aktifkan / matikan modul analisis
+#    gnclibre backup-config    jalankan backup konfigurasi perangkat sekarang
+#    gnclibre speedtest        jalankan speedtest sekarang
 #    gnclibre self-update      perbarui gnclibre dari GitHub
 #
 #  Sumber: https://github.com/ferdiptgnc/gnclibrenms
@@ -23,7 +26,7 @@
 
 set -uo pipefail
 
-readonly GNCLIBRE_VERSION="1.1.0"
+readonly GNCLIBRE_VERSION="1.2.0"
 readonly CONF_FILE=${GNCLIBRE_CONF:-/etc/gnclibre.conf}
 readonly LOG=${GNCLIBRE_LOG:-/var/log/gnclibre.log}
 readonly BT="GNC LibreNMS Manager v${GNCLIBRE_VERSION}  |  Galura Nexa Core"
@@ -77,6 +80,12 @@ Pemakaian (sebagai root):
   gnclibre validate         jalankan validate.php
   gnclibre branding         terapkan branding GNC (logo, favicon, judul, pesan login)
   gnclibre branding reset   kembalikan tampilan asli LibreNMS
+  gnclibre module oxidized  aktifkan backup konfigurasi (env GNC_OXI_USER, GNC_OXI_PASS)
+  gnclibre module analytics aktifkan Grafana + SLA (env GNC_SLA_TARGETS, GNC_SPEEDTEST_INTERVAL,
+                            GNC_GRAFANA_PORT, GNC_GRAFANA_PASS, GNC_GRAFANA_URL)
+  gnclibre module <nama> off  nonaktifkan modul (data tetap disimpan)
+  gnclibre backup-config    jalankan backup konfigurasi perangkat sekarang
+  gnclibre speedtest        jalankan speedtest sekarang
   gnclibre self-update      perbarui gnclibre dari GitHub
   gnclibre version          versi gnclibre
 EOF
@@ -150,7 +159,7 @@ load_env() {
   [[ -n $CF ]] || die "File compose tidak ditemukan di $DIR"
   ENVF=$DIR/.env; LENV=$DIR/librenms.env; DENV=$DIR/librenms/.env; MENV=$DIR/msmtpd.env
   INFO=$DIR/INSTALL-INFO.txt; BK=$DIR/backups
-  OVR=$DIR/compose.override.yml; BRD=$DIR/branding
+  OVR=$DIR/compose.override.yml; BRD=$DIR/branding; GENV=$DIR/gnc.env
   if docker compose version >/dev/null 2>&1; then DC=(docker compose)
   elif command -v docker-compose >/dev/null 2>&1; then DC=(docker-compose)
   else die "Docker Compose tidak ditemukan."; fi
@@ -283,6 +292,7 @@ status_text() {
   echo
   echo "Container:"
   dc ps --format 'table {{.Service}}\t{{.Status}}' 2>/dev/null || dc ps
+  echo; echo "Modul analisis:"; modules_status | sed 's/^/  /'
   if [[ -f $INFO ]]; then echo; echo "----- INSTALL-INFO.txt -----"; cat "$INFO"; fi
 }
 
@@ -921,22 +931,14 @@ GNC_B64
   chmod 644 "$d"/*.png
 }
 
-# Mount folder branding lewat compose.override.yml agar tetap ada setelah container di-recreate
+# Mount folder branding lewat compose.override.yml (dibangun oleh write_override) agar tetap ada setelah recreate
 ensure_brand_mount() {
   if [[ -f $OVR ]] && ! grep -q 'gnclibre' "$OVR"; then
     grep -q '/opt/librenms/html/images/custom' "$OVR" && return 0
     ui_msg "Perlu tindakan manual" "Sudah ada $OVR buatan sendiri.\nTambahkan volume ini ke service librenms:\n  - \"./branding:/opt/librenms/html/images/custom:ro\"" 12
     return 1
   fi
-  cat >"$OVR" <<'EOF'
-# Dibuat oleh gnclibre — folder branding (logo/favicon) untuk Web UI LibreNMS.
-# File ini otomatis dimuat oleh 'docker compose' di folder ini.
-services:
-  librenms:
-    volumes:
-      - "./branding:/opt/librenms/html/images/custom:ro"
-EOF
-  if ! dc config -q >>"$LOG" 2>&1; then rm -f "$OVR"; ui_msg "Gagal" "compose.override.yml tidak valid. Detail: $LOG"; return 1; fi
+  write_override
 }
 
 brand_asset_ok() { # brand_asset_ok <nama file> -> 0 bila file bisa diakses lewat Web UI
@@ -1036,6 +1038,2552 @@ m_brand() {
 }
 
 # ---------------------------------------------------------------------------
+# 10. Modul analisis: Backup konfigurasi (Oxidized) & Analitik/SLA (InfluxDB + Telegraf + Grafana)
+# ---------------------------------------------------------------------------
+genv_get() { envget "$GENV" "$1"; }
+genv_set() { [[ -f $GENV ]] || { touch "$GENV"; chmod 600 "$GENV"; }; envset "$GENV" "$1" "$2"; }
+mod_on()   { [[ $(genv_get "GNC_MOD_$1") == yes ]]; }
+rand_hex() { head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-"${1:-32}"; }
+rand_pass() { head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-"${1:-20}"; }
+yq() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }          # string YAML aman
+valid_svc_pass() { [[ $1 =~ ^[A-Za-z0-9._@#%+=:,!?^*~-]{8,64}$ ]]; }          # aman untuk env_file
+valid_targets() { local t; [[ -n $1 ]] || return 1; for t in $1; do valid_host "$t" || return 1; done; }
+valid_cred_user() { [[ $1 =~ ^[A-Za-z0-9._@-]{1,64}$ ]]; }
+lnms_url() { local u; u=$(envget "$LENV" LIBRENMS_BASE_URL); u=${u%/}; echo "${u:-$(local_url)}"; }
+gw_local() { ip -4 route show default 2>/dev/null | awk '{print $3; exit}'; }
+
+# ---- compose.override.yml: dibangun ulang dari status modul (gnc.env) ----
+write_override() {
+  local tmp tz gport n=0
+  if [[ -f $OVR ]] && ! grep -q 'gnclibre' "$OVR"; then
+    ui_msg "Perlu tindakan manual" "Sudah ada $OVR buatan sendiri, gnclibre tidak akan menimpanya.\nPindahkan/hapus file itu lalu ulangi." 11
+    return 1
+  fi
+  tz=$(envget "$ENVF" TZ); tz=${tz:-Asia/Jakarta}
+  gport=$(genv_get GRAFANA_PORT); gport=${gport:-3000}
+  tmp=$(mktemp)
+  {
+    echo "# Dibuat oleh gnclibre — jangan diedit manual, atur lewat menu 'gnclibre'."
+    echo "# File ini otomatis dimuat oleh 'docker compose' di folder ini."
+    echo "services:"
+    if [[ -d $BRD ]]; then n=$((n + 1)); cat <<'EOF'
+  librenms:
+    volumes:
+      - "./branding:/opt/librenms/html/images/custom:ro"
+EOF
+    fi
+    if mod_on OXIDIZED; then n=$((n + 1)); cat <<EOF
+  oxidized:
+    image: oxidized/oxidized:latest
+    container_name: librenms_oxidized
+    hostname: librenms-oxidized
+    environment:
+      TZ: "${tz}"
+      CONFIG_RELOAD_INTERVAL: "3600"
+    volumes:
+      - "./oxidized:/home/oxidized/.config/oxidized"
+    restart: always
+EOF
+    fi
+    if mod_on ANALYTICS; then n=$((n + 1)); cat <<EOF
+  influxdb:
+    image: influxdb:2.7
+    container_name: librenms_influxdb
+    env_file:
+      - "./influxdb.env"
+    environment:
+      TZ: "${tz}"
+    volumes:
+      - "./influxdb/data:/var/lib/influxdb2"
+      - "./influxdb/config:/etc/influxdb2"
+    restart: always
+  telegraf:
+    image: telegraf:latest
+    container_name: librenms_telegraf
+    env_file:
+      - "./telegraf.env"
+    environment:
+      TZ: "${tz}"
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+    volumes:
+      - "./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro"
+    depends_on:
+      - influxdb
+    restart: always
+  grafana:
+    image: grafana/grafana:latest
+    container_name: librenms_grafana
+    env_file:
+      - "./grafana.env"
+    environment:
+      TZ: "${tz}"
+    ports:
+      - target: 3000
+        published: ${gport}
+        protocol: tcp
+    volumes:
+      - "./grafana/data:/var/lib/grafana"
+      - "./grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "./grafana/dashboards:/etc/grafana/dashboards:ro"
+    depends_on:
+      - influxdb
+    restart: always
+EOF
+    fi
+  } >"$tmp"
+  [[ -f $OVR ]] && cp -p "$OVR" "$OVR.bak"
+  if ((n == 0)); then rm -f "$OVR" "$tmp"; return 0; fi
+  cat "$tmp" >"$OVR"; rm -f "$tmp"; chmod 644 "$OVR"
+  if ! dc config -q >>"$LOG" 2>&1; then
+    if [[ -f $OVR.bak ]]; then cp -p "$OVR.bak" "$OVR"; else rm -f "$OVR"; fi
+    ui_msg "Gagal" "compose.override.yml tidak valid, dikembalikan. Detail: $LOG"; return 1
+  fi
+}
+
+stack_up() { # recreate service yang berubah, hapus container modul yang dinonaktifkan
+  ui_info "Menerapkan perubahan container (download image pertama kali bisa beberapa menit)..."
+  dc up -d --remove-orphans >>"$LOG" 2>&1 && wait_web
+}
+
+# ---- Token API LibreNMS (Sanctum di 26.x, tabel api_tokens di versi lama) ----
+api_token_ok() {
+  local c
+  # shellcheck disable=SC2016
+  c=$(dc exec -T -e T="$1" librenms php -r '$x = stream_context_create(["http" => ["header" => "X-Auth-Token: " . getenv("T"), "ignore_errors" => true, "timeout" => 10]]);
+    @file_get_contents("http://127.0.0.1:8000/api/v0/oxidized", false, $x);
+    echo preg_match("#\s(\d{3})\s#", $http_response_header[0] ?? "", $m) ? $m[1] : "000";' 2>>"$LOG")
+  [[ $c == 200 ]]
+}
+
+api_token_create() { # tulis token ke stdout
+  local admin
+  admin=$(info_get "Admin username   "); admin=${admin:-admin}
+  dc exec -T --user librenms -e U="$admin" librenms php 2>>"$LOG" <<'PHP'
+<?php
+require '/opt/librenms/vendor/autoload.php';
+$app = require '/opt/librenms/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$u = App\Models\User::where('username', getenv('U'))->first();
+if (! $u) { try { $u = App\Models\User::role('admin')->first(); } catch (Throwable $e) { $u = null; } }
+if (! $u) { $u = App\Models\User::orderBy('user_id')->first(); }
+if (! $u) { fwrite(STDERR, "Tidak ada user LibreNMS\n"); exit(1); }
+if (method_exists($u, 'createToken')) {
+    echo $u->createToken('gnclibre-oxidized')->plainTextToken;
+} else {
+    $t = bin2hex(random_bytes(16));
+    Illuminate\Support\Facades\DB::table('api_tokens')->insert(['user_id' => $u->user_id, 'token_hash' => $t, 'description' => 'gnclibre-oxidized', 'disabled' => 0]);
+    echo $t;
+}
+PHP
+}
+
+ensure_api_token() { # token valid -> stdout
+  local t
+  t=$(genv_get API_TOKEN)
+  if [[ -n $t ]] && api_token_ok "$t"; then echo "$t"; return 0; fi
+  t=$(api_token_create | tr -d '\r\n')
+  [[ -n $t ]] && api_token_ok "$t" || { logf "Token API gagal dibuat/diverifikasi"; return 1; }
+  genv_set API_TOKEN "$t"; echo "$t"
+}
+
+# ---- Oxidized ----
+oxi_write_config() { # token
+  local d=$DIR/oxidized ru
+  mkdir -p "$d"
+  {
+    cat <<EOF
+---
+# Dibuat oleh gnclibre — ubah lewat menu 'gnclibre' > Modul Analisis
+username: $(yq "$(genv_get OXI_USER)")
+password: $(yq "$(genv_get OXI_PASS)")
+resolve_dns: false
+interval: 86400
+threads: 10
+timeout: 30
+retries: 2
+use_syslog: false
+debug: false
+next_adds_job: true
+pid: "/home/oxidized/.config/oxidized/pid"
+vars:
+  remove_secret: true
+input:
+  default: ssh
+  debug: false
+  ssh:
+    secure: false
+output:
+  default: git
+  git:
+    user: Oxidized GNC
+    email: oxidized@gnc.local
+    repo: "/home/oxidized/.config/oxidized/configs.git"
+source:
+  default: http
+  debug: false
+  http:
+    url: http://librenms:8000/api/v0/oxidized
+    map:
+      name: hostname
+      model: os
+      group: group
+    headers:
+      X-Auth-Token: $(yq "$1")
+model_map:
+  ruijie: rgos
+  mikrotik: routeros
+extensions:
+  oxidized-web:
+    load: true
+    listen: 0.0.0.0
+    port: 8888
+EOF
+    ru=$(genv_get OXI_RUIJIE_USER)
+    if [[ -n $ru ]]; then cat <<EOF
+models:
+  rgos:
+    username: $(yq "$ru")
+    password: $(yq "$(genv_get OXI_RUIJIE_PASS)")
+EOF
+    fi
+  } >"$d/config"
+  chown -R 30000:30000 "$d" 2>/dev/null
+  chmod 700 "$d"; chmod 600 "$d/config"
+}
+
+lnms_php_get() { # lnms_php_get <url>  -> isi respons (dari dalam jaringan Docker)
+  # shellcheck disable=SC2016
+  dc exec -T -e URL="$1" librenms php -r 'echo @file_get_contents(getenv("URL"), false, stream_context_create(["http" => ["timeout" => 60]]));' 2>>"$LOG"
+}
+
+oxi_node_names() {
+  # shellcheck disable=SC2016
+  dc exec -T librenms php -r '$n = json_decode(@file_get_contents("http://oxidized:8888/nodes.json"), true) ?: [];
+    foreach ($n as $x) { echo $x["name"], "\n"; }' 2>>"$LOG"
+}
+
+oxi_status_table() {
+  # shellcheck disable=SC2016
+  dc exec -T librenms php -r '$n = json_decode(@file_get_contents("http://oxidized:8888/nodes.json"), true);
+    if (! is_array($n)) { echo "Oxidized belum merespons (container baru jalan? tunggu 1-2 menit).\n"; exit; }
+    if (! $n) { echo "Belum ada device dari LibreNMS (cek token API / device sudah ditambahkan?).\n"; exit; }
+    printf("%-22s %-10s %-9s %s\n", "DEVICE", "MODEL", "STATUS", "BACKUP TERAKHIR");
+    foreach ($n as $x) { $l = $x["last"] ?? [];
+      printf("%-22s %-10s %-9s %s\n", $x["name"], $x["model"] ?? "-", $x["status"] ?? ($l["status"] ?? "-"), $x["time"] ?? ($l["end"] ?? "-")); }' 2>>"$LOG"
+  echo
+  echo "status: success = backup berhasil, no_connection = tidak bisa SSH, never = belum dicoba"
+  echo "Riwayat & diff konfigurasi: Web UI LibreNMS > device > tab Config"
+}
+
+oxi_backup_now() {
+  local n c=0
+  while read -r n; do
+    [[ -n $n ]] || continue
+    lnms_php_get "http://oxidized:8888/node/next/$n" >/dev/null && c=$((c + 1))
+  done < <(oxi_node_names)
+  echo "$c"
+}
+
+oxi_wait_nodes() { # tunggu Oxidized membaca daftar device dari LibreNMS -> jumlah node
+  local i n
+  for ((i = 1; i <= 20; i++)); do
+    n=$(oxi_node_names | grep -c .)
+    ((n > 0)) && { echo "$n"; return 0; }
+    sleep 6
+  done
+  echo 0
+}
+
+# oxi_enable [user] [pass] [ruijie_user] [ruijie_pass]  (kosong = tanyakan / pakai yang tersimpan)
+oxi_enable() {
+  local u=${1:-} p=${2:-} ru=${3:-} rp=${4:-} tok n
+  if ((TUI)); then
+    ui_input u "Backup Konfigurasi" "Username SSH perangkat jaringan (MikroTik/Ruijie) untuk backup konfigurasi.\nDisarankan user khusus read-only, mis. 'oxidized'." \
+      "$(genv_get OXI_USER)" valid_cred_user "Username 1-64 karakter: huruf, angka, . _ @ -" || return 0
+    ui_pass p "Password SSH untuk '$u'" 1 valid_safe_pass "Password tidak boleh mengandung tanda kutip tunggal (')." || return 0
+    if ui_yesno "Ruijie" "Apakah perangkat Ruijie memakai username/password yang BERBEDA?\n\n(Ruijie butuh user privilege 15 agar 'show running-config' bisa dibaca)" no; then
+      ui_input ru "Kredensial Ruijie" "Username SSH Ruijie:" "$(genv_get OXI_RUIJIE_USER)" valid_cred_user "Username tidak valid." || return 0
+      ui_pass rp "Password SSH Ruijie untuk '$ru'" 1 valid_safe_pass "Password tidak boleh mengandung tanda kutip tunggal (')." || return 0
+    fi
+  fi
+  [[ -n $u ]] || u=$(genv_get OXI_USER)
+  [[ -n $p ]] || p=$(genv_get OXI_PASS)
+  valid_cred_user "$u" && valid_safe_pass "$p" || { ui_msg "Gagal" "Username/password SSH belum diisi atau tidak valid."; return 1; }
+  genv_set OXI_USER "$u"; genv_set OXI_PASS "$p"
+  genv_set OXI_RUIJIE_USER "$ru"; genv_set OXI_RUIJIE_PASS "$rp"
+
+  ui_info "Membuat & memverifikasi token API LibreNMS..."
+  tok=$(ensure_api_token) || { ui_msg "Gagal" "Token API LibreNMS gagal dibuat/diverifikasi.\nPastikan user admin aktif. Detail: $LOG" 11; return 1; }
+  oxi_write_config "$tok"
+  genv_set GNC_MOD_OXIDIZED yes
+  write_override || return 1
+  stack_up || { ui_msg "Gagal" "Container tidak berjalan normal. Cek: gnclibre logs oxidized"; return 1; }
+  ui_info "Mengaktifkan integrasi Oxidized di LibreNMS..."
+  lnms_c config:set oxidized.enabled true >>"$LOG" 2>&1
+  lnms_c config:set oxidized.url "http://oxidized:8888" >>"$LOG" 2>&1
+  lnms_c config:set oxidized.features.versioning true >>"$LOG" 2>&1
+  lnms_c config:set oxidized.reload_nodes true >>"$LOG" 2>&1
+  ui_info "Menunggu Oxidized membaca daftar device dari LibreNMS..."
+  n=$(oxi_wait_nodes)
+  logf "Oxidized aktif ($n device)"
+  ui_msg "Backup konfigurasi aktif" "Oxidized membaca $n device dari LibreNMS. Backup otomatis setiap 24 jam.\n\nPastikan di setiap perangkat ada user SSH '$u':\n  MikroTik: /user add name=$u group=read password=...\n  Ruijie  : username $u privilege 15 password ...\n            (line vty 0 4 > login local)\n\nCek hasil: menu 'Status backup per device', atau\nWeb UI LibreNMS > device > tab Config." 19
+}
+
+# ---- Analitik & SLA ----
+an_write_files() {
+  local d=$DIR tok targets iv url gp urls="" t lnms
+  tok=$(genv_get INFLUX_TOKEN); targets=$(genv_get SLA_TARGETS); iv=$(genv_get SPEEDTEST_INTERVAL)
+  url=$(genv_get GRAFANA_URL); gp=$(genv_get GRAFANA_PORT); lnms=$(lnms_url)
+  mkdir -p "$d/influxdb/data" "$d/influxdb/config" "$d/telegraf" \
+    "$d/grafana/data" "$d/grafana/provisioning/datasources" "$d/grafana/provisioning/dashboards" "$d/grafana/dashboards"
+
+  # InfluxDB (variabel INIT hanya dipakai saat data masih kosong)
+  cat >"$d/influxdb.env" <<EOF
+DOCKER_INFLUXDB_INIT_MODE=setup
+DOCKER_INFLUXDB_INIT_USERNAME=gnc
+DOCKER_INFLUXDB_INIT_PASSWORD='$(genv_get INFLUX_PASS)'
+DOCKER_INFLUXDB_INIT_ORG=gnc
+DOCKER_INFLUXDB_INIT_BUCKET=gnc
+DOCKER_INFLUXDB_INIT_RETENTION=$(genv_get INFLUX_RETENTION)
+DOCKER_INFLUXDB_INIT_ADMIN_TOKEN='${tok}'
+EOF
+  printf "INFLUX_TOKEN='%s'\n" "$tok" >"$d/telegraf.env"
+
+  # Telegraf: ping (latency/loss/jitter) + speedtest
+  for t in $targets; do urls+="${urls:+, }\"$t\""; done
+  {
+    cat <<EOF
+# Dibuat oleh gnclibre — ubah target lewat menu 'gnclibre' > Modul Analisis
+[global_tags]
+  site = "$(hostname)"
+
+[agent]
+  interval = "60s"
+  round_interval = true
+  flush_interval = "30s"
+  hostname = "$(hostname)"
+
+[[outputs.influxdb_v2]]
+  urls = ["http://influxdb:8086"]
+  token = "\${INFLUX_TOKEN}"
+  organization = "gnc"
+  bucket = "gnc"
+
+[[inputs.ping]]
+  urls = [${urls}]
+  method = "native"
+  privileged = false
+  count = 10
+  ping_interval = "1s"
+  deadline = "15s"
+  interval = "60s"
+EOF
+    if [[ $iv != off ]]; then cat <<EOF
+
+[[inputs.internet_speed]]
+  interval = "${iv}"
+  cache = true
+  memory_saving_mode = false
+EOF
+    fi
+  } >"$d/telegraf/telegraf.conf"
+
+  # Grafana
+  {
+    echo "GF_SECURITY_ADMIN_USER=$(genv_get GRAFANA_USER)"
+    echo "GF_SECURITY_ADMIN_PASSWORD='$(genv_get GRAFANA_PASS)'"
+    echo "GF_USERS_ALLOW_SIGN_UP=false"
+    echo "GF_ANALYTICS_REPORTING_ENABLED=false"
+    echo "GF_ANALYTICS_CHECK_FOR_UPDATES=false"
+    echo "GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/dashboards/gnc-ringkasan.json"
+    [[ -n $url ]] && echo "GF_SERVER_ROOT_URL=${url%/}/"
+    echo "GNC_INFLUX_TOKEN='${tok}'"
+    echo "GNC_DB_NAME=$(envget "$ENVF" MYSQL_DATABASE)"
+    echo "GNC_DB_USER=$(envget "$ENVF" MYSQL_USER)"
+    echo "GNC_DB_PASSWORD='$(envget "$ENVF" MYSQL_PASSWORD)'"
+  } >"$d/grafana.env"
+  chmod 600 "$d/influxdb.env" "$d/telegraf.env" "$d/grafana.env"
+
+  cat >"$d/grafana/provisioning/datasources/gnc.yaml" <<'EOF'
+# Dibuat oleh gnclibre
+apiVersion: 1
+datasources:
+  - name: InfluxDB GNC
+    uid: gnc-influx
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    jsonData:
+      version: Flux
+      organization: gnc
+      defaultBucket: gnc
+      tlsSkipVerify: true
+    secureJsonData:
+      token: ${GNC_INFLUX_TOKEN}
+  - name: LibreNMS DB
+    uid: gnc-librenms-db
+    type: mysql
+    access: proxy
+    url: db:3306
+    user: ${GNC_DB_USER}
+    jsonData:
+      database: ${GNC_DB_NAME}
+      maxOpenConns: 5
+    secureJsonData:
+      password: ${GNC_DB_PASSWORD}
+EOF
+  cat >"$d/grafana/provisioning/dashboards/gnc.yaml" <<'EOF'
+# Dibuat oleh gnclibre
+apiVersion: 1
+providers:
+  - name: GNC
+    folder: GNC
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
+EOF
+  grafana_write_dashboards "$d/grafana/dashboards"
+  sed -i "s#__LNMS_URL__#${lnms}#g" "$d/grafana/dashboards/"*.json
+  chown -R 472:0 "$d/grafana/data" 2>/dev/null
+  chmod 755 "$d/grafana" "$d/grafana/dashboards" "$d/grafana/provisioning" "$d/grafana/provisioning/"*
+  chmod 644 "$d/grafana/dashboards/"*.json "$d/grafana/provisioning/"*/*.yaml "$d/telegraf/telegraf.conf"
+}
+
+grafana_write_dashboards() {
+  local d=$1
+  cat >"$d/gnc-ringkasan.json" <<'GNC_JSON'
+{
+ "uid": "gnc-ringkasan",
+ "title": "GNC - Ringkasan Jaringan",
+ "description": "Status device, alert aktif, dan port bermasalah dari LibreNMS",
+ "tags": [
+  "gnc"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "refresh": "1m",
+ "schemaVersion": 39,
+ "version": 1,
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "links": [
+  {
+   "title": "Ringkasan",
+   "url": "/d/gnc-ringkasan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Kualitas ISP",
+   "url": "/d/gnc-sla",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Trafik WAN",
+   "url": "/d/gnc-wan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "LibreNMS",
+   "url": "__LNMS_URL__",
+   "type": "link",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Total device",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS total FROM devices WHERE `ignore` = 0 AND disabled = 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Device UP",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 5,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS up FROM devices WHERE status = 1 AND `ignore` = 0 AND disabled = 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Device DOWN",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 10,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS down FROM devices WHERE status = 0 AND `ignore` = 0 AND disabled = 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Alert aktif",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 15,
+    "y": 0,
+    "w": 5,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS alert FROM alerts WHERE state != 0",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Port ber-error",
+   "description": "Port yang mencatat error pada polling terakhir (flag merah di LibreNMS)",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT COUNT(*) AS port FROM ports WHERE deleted = 0 AND (ifInErrors_rate > 0 OR ifOutErrors_rate > 0)",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "table",
+   "title": "Device DOWN",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT device_id, hostname AS Device, IFNULL(sysName, '') AS sysName, IFNULL(status_reason, '') AS Penyebab, last_polled AS `Terakhir dipoll` FROM devices WHERE status = 0 AND `ignore` = 0 AND disabled = 0 ORDER BY hostname",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "table",
+   "title": "Alert aktif",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT d.device_id, a.timestamp AS Waktu, d.hostname AS Device, r.name AS Alert, r.severity AS Severity, CASE a.state WHEN 1 THEN 'Alert' WHEN 2 THEN 'Ack' WHEN 3 THEN 'Memburuk' WHEN 4 THEN 'Membaik' ELSE a.state END AS Status FROM alerts a JOIN devices d ON d.device_id = a.device_id JOIN alert_rules r ON r.id = a.rule_id WHERE a.state != 0 ORDER BY a.timestamp DESC LIMIT 50",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "table",
+   "title": "Port dengan error (polling terakhir)",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT d.device_id, d.hostname AS Device, p.ifName AS Port, IFNULL(p.ifAlias, '') AS Deskripsi, ROUND(p.ifInErrors_rate, 3) AS `Error in/dtk`, ROUND(p.ifOutErrors_rate, 3) AS `Error out/dtk` FROM ports p JOIN devices d ON d.device_id = p.device_id WHERE p.deleted = 0 AND (p.ifInErrors_rate > 0 OR p.ifOutErrors_rate > 0) ORDER BY p.ifInErrors_rate + p.ifOutErrors_rate DESC LIMIT 30",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "table",
+   "title": "Daftar device",
+   "description": "",
+   "datasource": {
+    "type": "mysql",
+    "uid": "gnc-librenms-db"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 13,
+    "w": 12,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "device_id"
+      },
+      "properties": [
+       {
+        "id": "custom.hidden",
+        "value": true
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Device"
+      },
+      "properties": [
+       {
+        "id": "links",
+        "value": [
+         {
+          "title": "Buka di LibreNMS",
+          "targetBlank": true,
+          "url": "__LNMS_URL__/device/${__data.fields.device_id}"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "mysql",
+      "uid": "gnc-librenms-db"
+     },
+     "rawSql": "SELECT d.device_id, d.hostname AS Device, IFNULL(d.sysName, '') AS sysName, d.os AS OS, IFNULL(d.hardware, '') AS Hardware, IFNULL(l.location, '') AS Lokasi, IF(d.status = 1, 'UP', 'DOWN') AS Status FROM devices d LEFT JOIN locations l ON l.id = d.location_id WHERE d.`ignore` = 0 AND d.disabled = 0 ORDER BY d.hostname",
+     "format": "table",
+     "rawQuery": true,
+     "editorMode": "code"
+    }
+   ]
+  }
+ ]
+}
+GNC_JSON
+  cat >"$d/gnc-sla.json" <<'GNC_JSON'
+{
+ "uid": "gnc-sla",
+ "title": "GNC - Kualitas ISP (SLA)",
+ "description": "Latency, packet loss, jitter, dan speedtest berkala dari PC LibreNMS (Telegraf)",
+ "tags": [
+  "gnc"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "refresh": "1m",
+ "schemaVersion": 39,
+ "version": 1,
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "links": [
+  {
+   "title": "Ringkasan",
+   "url": "/d/gnc-ringkasan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Kualitas ISP",
+   "url": "/d/gnc-sla",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Trafik WAN",
+   "url": "/d/gnc-wan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "LibreNMS",
+   "url": "__LNMS_URL__",
+   "type": "link",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Paket sampai (rata-rata periode)",
+   "description": "100% dikurangi rata-rata packet loss per target selama periode yang dipilih",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 99
+       },
+       {
+        "color": "green",
+        "value": 99.9
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.url}",
+     "decimals": 2
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"percent_packet_loss\")\n  |> group(columns: [\"url\"])\n  |> mean()\n  |> map(fn: (r) => ({r with _value: 100.0 - r._value}))"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Latency rata-rata",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 12,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 50
+       },
+       {
+        "color": "red",
+        "value": 150
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.url}",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"average_response_ms\")\n  |> group(columns: [\"url\"])\n  |> mean()"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "Latency (ms)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"average_response_ms\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Packet loss (%)",
+   "description": "Nilai maksimum per jendela waktu agar lonjakan loss tidak tersamarkan",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 5,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"percent_packet_loss\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "Jitter / deviasi latency (ms)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"standard_deviation_ms\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "Latency maksimum (ms)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 13,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.url}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ping\" and r._field == \"maximum_response_ms\")\n  |> group(columns: [\"url\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Download terakhir",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Download",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"download\")\n  |> group(columns: [\"_measurement\"])\n  |> last()"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "stat",
+   "title": "Upload terakhir",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 6,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Upload",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"upload\")\n  |> group(columns: [\"_measurement\"])\n  |> last()"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "stat",
+   "title": "Download rata-rata",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Download",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"download\")\n  |> group(columns: [\"_measurement\"])\n  |> mean()"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "stat",
+   "title": "Upload rata-rata",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 21,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "Upload",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"upload\")\n  |> group(columns: [\"_measurement\"])\n  |> mean()"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Speedtest download & upload (Mbps)",
+   "description": "Satu titik per speedtest (default setiap 4 jam)",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 26,
+    "w": 16,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Mbits",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "showPoints": "always",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.arah}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"download\")\n  |> group(columns: [\"_measurement\"])\n  |> map(fn: (r) => ({r with arah: \"Download\"}))\n  |> group(columns: [\"arah\"])"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"internet_speed\" and r._field == \"upload\")\n  |> group(columns: [\"_measurement\"])\n  |> map(fn: (r) => ({r with arah: \"Upload\"}))\n  |> group(columns: [\"arah\"])"
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "type": "text",
+   "title": "Cara membaca",
+   "gridPos": {
+    "x": 16,
+    "y": 26,
+    "w": 8,
+    "h": 8
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**Target ping** diatur lewat `gnclibre` → Modul Analisis → Analitik & SLA.\n\n- **Paket sampai < 99,9%** atau **loss > 1%** berulang → indikasi gangguan link/ISP.\n- **Latency lokal (router) tinggi** → masalah di LAN/router, bukan ISP.\n- **Latency 1.1.1.1 / 8.8.8.8 tinggi, router normal** → masalah di sisi ISP.\n- **Speedtest** jauh di bawah paket berlangganan secara konsisten → bukti untuk komplain ISP.\n\nEkspor grafik: menu panel → *Share* → *Export* / *Snapshot*."
+   }
+  }
+ ]
+}
+GNC_JSON
+  cat >"$d/gnc-wan.json" <<'GNC_JSON'
+{
+ "uid": "gnc-wan",
+ "title": "GNC - Trafik WAN",
+ "description": "Trafik port WAN (deskripsi interface diawali 'Transit:') dari LibreNMS",
+ "tags": [
+  "gnc"
+ ],
+ "timezone": "browser",
+ "editable": false,
+ "graphTooltip": 1,
+ "refresh": "5m",
+ "schemaVersion": 39,
+ "version": 1,
+ "time": {
+  "from": "now-24h",
+  "to": "now"
+ },
+ "links": [
+  {
+   "title": "Ringkasan",
+   "url": "/d/gnc-ringkasan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Kualitas ISP",
+   "url": "/d/gnc-sla",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "Trafik WAN",
+   "url": "/d/gnc-wan",
+   "type": "link",
+   "icon": "dashboard"
+  },
+  {
+   "title": "LibreNMS",
+   "url": "__LNMS_URL__",
+   "type": "link",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": [
+   {
+    "type": "query",
+    "name": "host",
+    "label": "Device",
+    "datasource": {
+     "type": "influxdb",
+     "uid": "gnc-influx"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false,
+    "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"gnc\", tag: \"hostname\", predicate: (r) => r._measurement == \"ports\", start: -30d)"
+   },
+   {
+    "type": "query",
+    "name": "port",
+    "label": "Port",
+    "datasource": {
+     "type": "influxdb",
+     "uid": "gnc-influx"
+    },
+    "refresh": 2,
+    "sort": 1,
+    "includeAll": false,
+    "multi": false,
+    "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"gnc\", tag: \"ifName\", predicate: (r) => r._measurement == \"ports\" and r.hostname == \"${host}\", start: -30d)"
+   }
+  ]
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "timeseries",
+   "title": "Trafik semua port WAN (Transit)",
+   "description": "Port dengan deskripsi 'Transit: ...'. Kosong? Lihat panel petunjuk di bawah.",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.ifName} ${__field.labels.arah} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"In\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"Out\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Persentil-95 masuk",
+   "description": "Nilai 95th percentile, umum dipakai untuk billing bandwidth",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> quantile(q: 0.95, method: \"estimate_tdigest\")"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Persentil-95 keluar",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 6,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> quantile(q: 0.95, method: \"estimate_tdigest\")"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Volume masuk (periode)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "decbytes",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> integral(unit: 1s)\n  |> map(fn: (r) => ({r with _value: r._value / 8.0}))"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Volume keluar (periode)",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 9,
+    "w": 6,
+    "h": 5
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "decbytes",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     },
+     "displayName": "${__field.labels.ifName} (${__field.labels.hostname})"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "justifyMode": "center",
+    "textMode": "auto",
+    "orientation": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> group(columns: [\"hostname\", \"ifName\"])\n  |> integral(unit: 1s)\n  |> map(fn: (r) => ({r with _value: r._value / 8.0}))"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "Error port WAN (per detik)",
+   "description": "Error berulang di WAN biasanya kabel/konektor/ONT (lihat juga flag merah di LibreNMS)",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.ifName} ${__field.labels.arah} (${__field.labels.hostname})",
+     "decimals": 3
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifInErrors_rate\")\n  |> map(fn: (r) => ({r with arah: \"In\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.port_descr_type == \"transit\")\n  |> filter(fn: (r) => r._field == \"ifOutErrors_rate\")\n  |> map(fn: (r) => ({r with arah: \"Out\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "text",
+   "title": "Petunjuk: menandai port WAN",
+   "gridPos": {
+    "x": 12,
+    "y": 14,
+    "w": 12,
+    "h": 8
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "Panel WAN membaca port yang **deskripsinya diawali `Transit:`**.\n\n**Ruijie**\n```\ninterface GigabitEthernet 0/1\n description Transit: Telkom-Astinet {100Mbps}\n```\n**MikroTik**\n```\n/interface ethernet set ether1 comment=\"Transit: Telkom-Astinet {100Mbps}\"\n```\nData muncul setelah polling berikutnya (±5 menit). Port mana pun tetap bisa dilihat lewat pilihan **Device** & **Port** di atas (panel bawah)."
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Port terpilih: ${port} (${host})",
+   "description": "",
+   "datasource": {
+    "type": "influxdb",
+    "uid": "gnc-influx"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 22,
+    "w": 24,
+    "h": 9
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "pointSize": 6,
+      "spanNulls": true,
+      "axisSoftMin": 0
+     },
+     "displayName": "${__field.labels.arah}"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom",
+     "calcs": [
+      "mean",
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.hostname == \"${host}\" and r.ifName == \"${port}\")\n  |> filter(fn: (r) => r._field == \"ifInBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"In\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "influxdb",
+      "uid": "gnc-influx"
+     },
+     "query": "from(bucket: \"gnc\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ports\" and r.hostname == \"${host}\" and r.ifName == \"${port}\")\n  |> filter(fn: (r) => r._field == \"ifOutBits_rate\")\n  |> map(fn: (r) => ({r with arah: \"Out\"}))\n  |> group(columns: [\"hostname\", \"ifName\", \"arah\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+    }
+   ]
+  }
+ ]
+}
+GNC_JSON
+}
+
+grafana_url() { local u; u=$(genv_get GRAFANA_URL); [[ -n $u ]] && { echo "${u%/}"; return; }; echo "http://$(local_ip):$(genv_get GRAFANA_PORT)"; }
+grafana_ok() { local c; c=$(curl -s -m 5 "http://127.0.0.1:$(genv_get GRAFANA_PORT)/api/health" 2>/dev/null); [[ $c == *'"database"'*'ok'* ]]; }
+influx_ok()  { dc exec -T influxdb influx ping >/dev/null 2>&1; }
+
+wait_for() { # wait_for <fungsi> <detik>
+  local i
+  for ((i = 0; i < $2; i += 5)); do "$1" && return 0; sleep 5; done
+  return 1
+}
+
+# an_enable  (nilai dari env GNC_* bila mode CLI)
+an_enable() {
+  local targets iv gp gpass gurl cur_port
+  targets=$(genv_get SLA_TARGETS); [[ -n $targets ]] || targets="$(gw_local) 1.1.1.1 8.8.8.8"
+  targets=$(trim "${GNC_SLA_TARGETS:-$targets}")
+  iv=${GNC_SPEEDTEST_INTERVAL:-$(genv_get SPEEDTEST_INTERVAL)}; iv=${iv:-4h}
+  cur_port=$(genv_get GRAFANA_PORT)
+  gp=${GNC_GRAFANA_PORT:-${cur_port:-3000}}
+  gpass=${GNC_GRAFANA_PASS:-}
+  gurl=${GNC_GRAFANA_URL-$(genv_get GRAFANA_URL)}
+  if ((TUI)); then
+    ui_input targets "Target Ping (SLA)" "IP/host yang di-ping setiap menit, pisahkan spasi.\nSaran: router lokal, gateway ISP (bila tahu), 1.1.1.1, 8.8.8.8" \
+      "$targets" valid_targets "Isi IP/hostname yang valid, dipisah spasi." || return 0
+    iv=$(ui_menu "Speedtest" "Seberapa sering speedtest dijalankan?\n(Setiap tes memakai bandwidth ratusan MB pada link cepat)" \
+      "1h" "Setiap 1 jam" "2h" "Setiap 2 jam" "4h" "Setiap 4 jam (disarankan)" "6h" "Setiap 6 jam" "off" "Nonaktifkan speedtest") || return 0
+    while true; do
+      ui_input gp "Port Grafana" "Port Web UI Grafana:" "$gp" valid_port "Port harus angka 1-65535." || return 0
+      [[ $gp == "$cur_port" ]] && mod_on ANALYTICS && break
+      [[ -z $(ss -Hltn "sport = :$gp" 2>/dev/null) ]] && break
+      ui_msg "Port dipakai" "Port $gp sudah dipakai aplikasi lain."
+    done
+    ui_input gurl "URL Publik Grafana (opsional)" "Bila Grafana diakses lewat Cloudflare Tunnel, isi URL-nya.\nContoh: https://grafana.klien.gnclab.online\nKosongkan bila hanya lewat IP lokal." \
+      "$gurl" valid_public_url "Format: https://nama.domain (tanpa path)" || return 0
+    if [[ -z $(genv_get GRAFANA_PASS) ]]; then
+      ui_pass gpass "Password admin Grafana (user: admin)" 8 valid_svc_pass "8-64 karakter, tanpa spasi, \$, kutip, atau backslash." || return 0
+    fi
+  fi
+  valid_targets "$targets" || { ui_msg "Gagal" "Target ping tidak valid: $targets"; return 1; }
+  [[ $iv =~ ^([0-9]+[mh]|off)$ ]] || iv=4h
+  genv_set SLA_TARGETS "$targets"; genv_set SPEEDTEST_INTERVAL "$iv"
+  genv_set GRAFANA_PORT "$gp"; genv_set GRAFANA_URL "${gurl%/}"
+  [[ -n $(genv_get GRAFANA_USER) ]] || genv_set GRAFANA_USER admin
+  if [[ -z $(genv_get GRAFANA_PASS) ]]; then
+    valid_svc_pass "$gpass" || gpass=$(rand_pass 16)
+    genv_set GRAFANA_PASS "$gpass"
+  fi
+  [[ -n $(genv_get INFLUX_TOKEN) ]] || genv_set INFLUX_TOKEN "gnc$(rand_hex 45)"   # awalan huruf: tidak dibaca sebagai angka/JSON
+  [[ -n $(genv_get INFLUX_PASS) ]] || genv_set INFLUX_PASS "$(rand_pass 20)"
+  [[ -n $(genv_get INFLUX_RETENTION) ]] || genv_set INFLUX_RETENTION "90d"
+
+  an_write_files
+  genv_set GNC_MOD_ANALYTICS yes
+  write_override || return 1
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then ufw allow "$gp/tcp" >>"$LOG" 2>&1; fi
+  stack_up || { ui_msg "Gagal" "Container tidak berjalan normal. Cek: gnclibre logs influxdb"; return 1; }
+  dc restart telegraf >>"$LOG" 2>&1            # baca ulang telegraf.conf bila target berubah
+  ui_info "Menunggu InfluxDB siap..."
+  wait_for influx_ok 90 || { ui_msg "Gagal" "InfluxDB belum siap. Cek: gnclibre logs influxdb"; return 1; }
+  ui_info "Mengirim data LibreNMS ke InfluxDB..."
+  lnms_c config:set influxdbv2.enable true >>"$LOG" 2>&1
+  lnms_c config:set influxdbv2.transport http >>"$LOG" 2>&1
+  lnms_c config:set influxdbv2.host influxdb >>"$LOG" 2>&1
+  lnms_c config:set influxdbv2.port 8086 >>"$LOG" 2>&1
+  lnms_c config:set influxdbv2.organization gnc >>"$LOG" 2>&1
+  lnms_c config:set influxdbv2.bucket gnc >>"$LOG" 2>&1
+  lnms_c config:set influxdbv2.token "$(genv_get INFLUX_TOKEN)" >>"$LOG" 2>&1
+  has_service dispatcher && dc restart dispatcher >>"$LOG" 2>&1
+  ui_info "Menunggu Grafana siap..."
+  wait_for grafana_ok 120 || { ui_msg "Gagal" "Grafana belum merespons. Cek: gnclibre logs grafana"; return 1; }
+  info_set "Grafana          " "$(grafana_url)  (user: $(genv_get GRAFANA_USER))"
+  logf "Analitik & SLA aktif (target: $targets, speedtest: $iv)"
+  ui_msg "Analitik & SLA aktif" "Grafana : $(grafana_url)\nLogin   : $(genv_get GRAFANA_USER) / (password yang diisi; lihat $GENV)\n\nDashboard GNC: Ringkasan, Kualitas ISP (SLA), Trafik WAN.\nTarget ping : $targets\nSpeedtest   : $iv\n\nData SLA mulai terlihat ±2 menit, trafik WAN setelah polling berikutnya (±5 menit)." 16
+}
+
+an_check_data() {
+  echo "Jumlah titik data 15 menit terakhir per measurement:"
+  # shellcheck disable=SC2016
+  dc exec -T influxdb influx query --raw 'from(bucket: "gnc") |> range(start: -15m)
+    |> filter(fn: (r) => r._measurement == "ping" or r._measurement == "internet_speed" or r._measurement == "ports")
+    |> group(columns: ["_measurement"]) |> count() |> keep(columns: ["_measurement", "_value"])' 2>&1 \
+    | awk -F, '/^,_result/ || /^,,/ {print "  " $(NF-1) " : " $NF}' | sed 's/\r//'
+  echo
+  echo "ping           = data SLA dari Telegraf (harus > 0 setelah 2 menit)"
+  echo "internet_speed = hasil speedtest (muncul sesuai jadwal)"
+  echo "ports          = trafik interface dari LibreNMS (setelah polling 5 menit)"
+}
+
+an_speedtest_now() {
+  dc exec -T telegraf telegraf --config /etc/telegraf/telegraf.conf --input-filter internet_speed --once 2>&1 | tail -n 5
+  echo; echo "Selesai. Hasil tampil di dashboard 'GNC - Kualitas ISP (SLA)'."
+}
+
+grafana_reset_pass() {
+  local p
+  ui_pass p "Password baru admin Grafana" 8 valid_svc_pass "8-64 karakter, tanpa spasi, \$, kutip, atau backslash." || return 0
+  if dc exec -T grafana grafana cli admin reset-admin-password "$p" >>"$LOG" 2>&1; then
+    genv_set GRAFANA_PASS "$p"; ui_msg "Berhasil" "Password admin Grafana diganti."
+  else ui_msg "Gagal" "Gagal mengganti password. Detail: $LOG"; fi
+}
+
+mod_disable() { # mod_disable OXIDIZED|ANALYTICS
+  genv_set "GNC_MOD_$1" no
+  write_override || return 1
+  if [[ $1 == OXIDIZED ]]; then lnms_c config:set oxidized.enabled false >>"$LOG" 2>&1
+  else lnms_c config:set influxdbv2.enable false >>"$LOG" 2>&1; has_service dispatcher && dc restart dispatcher >>"$LOG" 2>&1; fi
+  stack_up
+  logf "Modul $1 dinonaktifkan (data tetap disimpan)"
+  ui_msg "Dinonaktifkan" "Modul dimatikan. Data tetap tersimpan di $DIR dan dipakai lagi bila diaktifkan kembali."
+}
+
+modules_status() {
+  local s
+  printf '%-34s %s\n' "Backup konfigurasi (Oxidized)" "$(mod_on OXIDIZED && echo AKTIF || echo nonaktif)"
+  printf '%-34s %s\n' "Analitik & SLA (Grafana)" "$(mod_on ANALYTICS && echo AKTIF || echo nonaktif)"
+  if mod_on ANALYTICS; then
+    printf '  %-32s %s\n' "Grafana" "$(grafana_url) ($(grafana_ok && echo OK || echo TIDAK MERESPONS))"
+    printf '  %-32s %s\n' "Target ping" "$(genv_get SLA_TARGETS)"
+    printf '  %-32s %s\n' "Speedtest" "$(genv_get SPEEDTEST_INTERVAL)"
+  fi
+  echo; echo "Container modul:"
+  for s in oxidized influxdb telegraf grafana; do
+    has_service "$s" && printf '  %-10s %s\n' "$s" "$(dc ps --format '{{.Status}}' "$s" 2>/dev/null | head -n1)"
+  done
+  return 0
+}
+
+m_modules() {
+  local c m
+  while true; do
+    c=$(ui_menu "Modul Analisis" "Oxidized: $(mod_on OXIDIZED && echo AKTIF || echo nonaktif)   |   Analitik & SLA: $(mod_on ANALYTICS && echo AKTIF || echo nonaktif)" \
+      1 "Status modul" \
+      2 "Backup konfigurasi (Oxidized): aktifkan / ubah kredensial" \
+      3 "Jalankan backup konfigurasi sekarang" \
+      4 "Status backup per device" \
+      5 "Analitik & SLA (Grafana): aktifkan / ubah target" \
+      6 "Jalankan speedtest sekarang" \
+      7 "Cek data masuk ke InfluxDB" \
+      8 "Reset password admin Grafana" \
+      9 "Nonaktifkan modul" \
+      0 "Kembali") || return 0
+    case $c in
+      1) ui_run "Status Modul" modules_status ;;
+      2) oxi_enable ;;
+      3) if mod_on OXIDIZED; then ui_info "Meminta backup semua device..."; ui_msg "Backup dijadwalkan" "$(oxi_backup_now) device masuk antrean backup.\nCek hasilnya 1-2 menit lagi di 'Status backup per device'."; else ui_msg "Belum aktif" "Aktifkan dulu modul Backup konfigurasi."; fi ;;
+      4) if mod_on OXIDIZED; then ui_run "Status Backup Konfigurasi" oxi_status_table; else ui_msg "Belum aktif" "Aktifkan dulu modul Backup konfigurasi."; fi ;;
+      5) an_enable ;;
+      6) if mod_on ANALYTICS && [[ $(genv_get SPEEDTEST_INTERVAL) != off ]]; then ui_run "Speedtest (30-90 detik)" an_speedtest_now; else ui_msg "Tidak tersedia" "Aktifkan modul Analitik & SLA dengan speedtest terlebih dahulu."; fi ;;
+      7) if mod_on ANALYTICS; then ui_run "Data InfluxDB" an_check_data; else ui_msg "Belum aktif" "Aktifkan dulu modul Analitik & SLA."; fi ;;
+      8) if mod_on ANALYTICS; then grafana_reset_pass; else ui_msg "Belum aktif" "Aktifkan dulu modul Analitik & SLA."; fi ;;
+      9) m=$(ui_menu "Nonaktifkan" "Pilih modul (data tidak dihapus):" OXIDIZED "Backup konfigurasi (Oxidized)" ANALYTICS "Analitik & SLA (Grafana)") || continue
+         ui_yesno "Konfirmasi" "Nonaktifkan modul $m?" no && mod_disable "$m" ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Menu utama
 # ---------------------------------------------------------------------------
 main_menu() {
@@ -1053,6 +3601,7 @@ main_menu() {
       7 "Layanan (restart, log, update)" \
       8 "Backup & restore" \
       9 "Branding (logo, judul, pesan login)" \
+      10 "Modul analisis (backup config, Grafana & SLA)" \
       0 "Keluar") || return 0
     case $c in
       1) ui_run "Status LibreNMS" status_text ;;
@@ -1064,6 +3613,7 @@ main_menu() {
       7) m_service ;;
       8) m_backup ;;
       9) m_brand ;;
+      10) m_modules ;;
       0) return 0 ;;
     esac
   done
@@ -1089,7 +3639,7 @@ main() {
   case $cmd in
     -h|--help|help) show_banner; usage; return 0 ;;
     -v|--version|version) echo "gnclibre $GNCLIBRE_VERSION"; return 0 ;;
-    menu|status|passwd|restart|update|backup|logs|validate|self-update|branding) ;;
+    menu|status|passwd|restart|update|backup|logs|validate|self-update|branding|module|backup-config|speedtest) ;;
     *) usage; return 1 ;;
   esac
   need_root "$@"
@@ -1108,6 +3658,18 @@ main() {
     validate) dc exec -T --user librenms librenms php validate.php ;;
     branding) if [[ ${2:-} == reset ]]; then brand_reset
               else brand_apply "" "${GNC_BRAND_TITLE:-}" "${GNC_BRAND_MESSAGE:-}"; fi ;;
+    module)
+      case "${2:-}:${3:-}" in
+        oxidized:)      oxi_enable "${GNC_OXI_USER:-}" "${GNC_OXI_PASS:-}" "${GNC_OXI_RUIJIE_USER:-}" "${GNC_OXI_RUIJIE_PASS:-}" ;;
+        analytics:)     an_enable ;;
+        oxidized:off)   mod_disable OXIDIZED ;;
+        analytics:off)  mod_disable ANALYTICS ;;
+        *) echo "Pemakaian: gnclibre module <oxidized|analytics> [off]"; return 1 ;;
+      esac ;;
+    backup-config) mod_on OXIDIZED || die "Modul Oxidized belum aktif (gnclibre module oxidized)."
+                   okp "$(oxi_backup_now) device masuk antrean backup." ;;
+    speedtest)     mod_on ANALYTICS || die "Modul Analitik belum aktif (gnclibre module analytics)."
+                   an_speedtest_now ;;
   esac
 }
 
