@@ -26,6 +26,11 @@ LNMS_ENABLE_SYSLOG="yes"
 LNMS_ENABLE_TRAP="yes"
 LNMS_MONITOR_SELF="yes"
 LNMS_ALLOW_DUP_SYSNAME="yes"        # izinkan banyak device dengan sysName sama
+
+# --- Branding Web UI ---
+LNMS_BRANDING="yes"                # logo GNC, favicon, judul & pesan login
+LNMS_BRAND_TITLE="GNC NMS - Klien A"
+LNMS_BRAND_MESSAGE="Sistem monitoring jaringan Galura Nexa Core. Akses hanya untuk pengguna yang berwenang."
 LNMS_LOCATION="Kantor Klien A"
 
 # --- Email alert (opsional) ---

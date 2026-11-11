@@ -15,6 +15,7 @@
 #    gnclibre backup           backup database
 #    gnclibre logs [service]   ikuti log container (default: librenms)
 #    gnclibre validate         jalankan validate.php
+#    gnclibre branding [reset] terapkan / kembalikan branding GNC
 #    gnclibre self-update      perbarui gnclibre dari GitHub
 #
 #  Sumber: https://github.com/ferdiptgnc/gnclibrenms
@@ -22,12 +23,15 @@
 
 set -uo pipefail
 
-readonly GNCLIBRE_VERSION="1.0.1"
+readonly GNCLIBRE_VERSION="1.1.0"
 readonly CONF_FILE=${GNCLIBRE_CONF:-/etc/gnclibre.conf}
 readonly LOG=${GNCLIBRE_LOG:-/var/log/gnclibre.log}
 readonly BT="GNC LibreNMS Manager v${GNCLIBRE_VERSION}  |  Galura Nexa Core"
 readonly W=78
 readonly REPO_RAW=${GNCLIBRE_REPO_RAW:-https://raw.githubusercontent.com/ferdiptgnc/gnclibrenms/main}
+readonly BRAND_TITLE_DEFAULT="GNC NMS"
+readonly BRAND_MSG_DEFAULT="Sistem monitoring jaringan Galura Nexa Core. Akses hanya untuk pengguna yang berwenang."
+readonly LNMS_MSG_DEFAULT="Unauthorised access or use shall render the user liable to criminal and/or civil prosecution."
 readonly DEFAULT_PROXIES="127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
 TUI=0
 
@@ -71,6 +75,8 @@ Pemakaian (sebagai root):
   gnclibre backup           backup database
   gnclibre logs [service]   ikuti log container (default: librenms)
   gnclibre validate         jalankan validate.php
+  gnclibre branding         terapkan branding GNC (logo, favicon, judul, pesan login)
+  gnclibre branding reset   kembalikan tampilan asli LibreNMS
   gnclibre self-update      perbarui gnclibre dari GitHub
   gnclibre version          versi gnclibre
 EOF
@@ -144,12 +150,17 @@ load_env() {
   [[ -n $CF ]] || die "File compose tidak ditemukan di $DIR"
   ENVF=$DIR/.env; LENV=$DIR/librenms.env; DENV=$DIR/librenms/.env; MENV=$DIR/msmtpd.env
   INFO=$DIR/INSTALL-INFO.txt; BK=$DIR/backups
+  OVR=$DIR/compose.override.yml; BRD=$DIR/branding
   if docker compose version >/dev/null 2>&1; then DC=(docker compose)
   elif command -v docker-compose >/dev/null 2>&1; then DC=(docker-compose)
   else die "Docker Compose tidak ditemukan."; fi
 }
 
-dc()     { "${DC[@]}" -f "$CF" --project-directory "$DIR" "$@"; }
+dc() {
+  # compose.override.yml dimuat otomatis oleh 'docker compose' biasa; dengan -f harus disebut eksplisit
+  if [[ -f $OVR ]]; then "${DC[@]}" -f "$CF" -f "$OVR" --project-directory "$DIR" "$@"
+  else "${DC[@]}" -f "$CF" --project-directory "$DIR" "$@"; fi
+}
 lnms_c() { dc exec -T --user librenms librenms lnms "$@"; }
 # SQL dibaca dari stdin; kredensial diambil dari env container database
 sqlq()   { dc exec -T db sh -c 'exec mariadb -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -N -B'; }
@@ -721,6 +732,310 @@ m_backup() {
 }
 
 # ---------------------------------------------------------------------------
+# 9. Branding (logo, favicon, judul, pesan login)
+# ---------------------------------------------------------------------------
+# Aset default GNC (PNG, base64) — ditulis ke $BRD lalu di-mount ke html/images/custom
+brand_write_assets() {
+  local d=$1
+  mkdir -p "$d" && chmod 755 "$d"
+  base64 -d >"$d/gnc-logo.png" <<'GNC_B64'
+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
+GNC_B64
+  base64 -d >"$d/gnc-favicon.png" <<'GNC_B64'
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAAwFBMVEX+/v4AEj3p6u4DGEIUJ0+w
+tsQjNVoAAAAeMVYACzeYhWxqdo+kq7n///83SGmLlanW1NOomIOTfWPPxrpHVnR3gplbaIShjHTH
+ytGaorO9w87+/v63tK6JeV2lknvi29T////////////////X2uHe4efn492CjKGxo5CdkHckLUks
+PWE8RFhgbYh/iqBGTmRUY3+6sZ/CuqoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAACZJoA4AAAAQHRSTlP+//7/////AP//////Cf///v////////////+T/////ydReMH/////
+//////////////8AAAAAAAAAAAAAAAAA5SGbuQAAAvxJREFUeNrdl9mWojAQhhMSAgnIJgjaatvu
+vcz6/g83lYCMpGga9WbO/Bd96qRTn0XyE1LEA008b7PdkRu0225MmucRkz95IjfraWIIROe/kLv0
+ogkE/mzJndpCMrn795sayGQCwcLVquz/O8mzkT1emekLiCDbg/ULKNOihTVxmimttTV8aqYHsJIe
+2cCIz7gWEzZAlev1ukyt4aiezrlDIF1voKDFPtkHNEIVpA6pFALIAKafqADAE9H+ETLWlUkMOBOS
+ZBign3VuALX9asB32VeBM1VDADIMUKVSZTkCwEUURYK9owpKENqFiJnpZhFr5ZJKKWFzYmvq8fnH
+W3g8dgdjzsz0q4KdIiiKIIgwAZ4utEZixqJAzy8c5MwcEwQNcf7n3sYEGzCc30OwAF/lY0IX8HU+
+InQAY/JtgpDujfmGULiNQsGCS1yMzDcERhvBS34JGcvHnlTwwotG8NY3kc/5YSwgkDOnkaDzJnIZ
+d24A4F1YPApw/ytA8pqC1ukA4Bt2YkX5ZTBZqdUKvhmdJPdKOc2xE0+Mzy+j6nU6XXYBOb0S4z1O
+ZG0oP/RB/ZxdA5aS+8JvZOxXR/7fEKJ6iuC5BiQdQEz9vdNq1jrx0HFi0oRTpc7nVL12AOIGJ1Z6
+EVdWBcIZv43HX0ut33cDejT/5wB9TrwJcHGiK9rz8XQDYEY5sp8Oq88BYbcCfjGldmIbgpNGAkjr
+SXBifIndIYIF6P8yLQYIowBDhCX1RwAGCO6oCgYIruRkDOATguOEbx/JsR8wJzZBuJXWFWetb4Mq
+m6L0KgIfxIjQKGjHUnMpVwjg+PpMlKgGMBfXvmqXLc2mzjHFFcRSVM4M3cFzGYCvQlav+84A4HnO
+GBDIQH8P7B3OzVXXNeM7c903P95fQQLdyDuu4LA/zFl93d+YNSjXsIoIcOCUCyZjdIO5bjh0y1Nm
+KsvUCu/CQsCnpUCFUf2KM/nTtDy66Upq9XnRDfd4cBHCAbN066br4bbv4cbz8db38eb7sfb/DzFM
+NsyzUoilAAAAAElFTkSuQmCC
+GNC_B64
+  chmod 644 "$d"/*.png
+}
+
+# Mount folder branding lewat compose.override.yml agar tetap ada setelah container di-recreate
+ensure_brand_mount() {
+  if [[ -f $OVR ]] && ! grep -q 'gnclibre' "$OVR"; then
+    grep -q '/opt/librenms/html/images/custom' "$OVR" && return 0
+    ui_msg "Perlu tindakan manual" "Sudah ada $OVR buatan sendiri.\nTambahkan volume ini ke service librenms:\n  - \"./branding:/opt/librenms/html/images/custom:ro\"" 12
+    return 1
+  fi
+  cat >"$OVR" <<'EOF'
+# Dibuat oleh gnclibre — folder branding (logo/favicon) untuk Web UI LibreNMS.
+# File ini otomatis dimuat oleh 'docker compose' di folder ini.
+services:
+  librenms:
+    volumes:
+      - "./branding:/opt/librenms/html/images/custom:ro"
+EOF
+  if ! dc config -q >>"$LOG" 2>&1; then rm -f "$OVR"; ui_msg "Gagal" "compose.override.yml tidak valid. Detail: $LOG"; return 1; fi
+}
+
+brand_asset_ok() { # brand_asset_ok <nama file> -> 0 bila file bisa diakses lewat Web UI
+  local c; c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$(web_port)/images/custom/$1" 2>/dev/null)
+  [[ $c == 200 ]]
+}
+
+# brand_apply [logo] [judul] [pesan]
+brand_apply() {
+  local logo=${1:-gnc-logo.png} title=${2:-$BRAND_TITLE_DEFAULT} msg=${3:-$BRAND_MSG_DEFAULT} ok=1
+  ui_info "Menyiapkan file logo..."
+  brand_write_assets "$BRD"
+  ensure_brand_mount || return 1
+  apply_stack || { ui_msg "Gagal" "Web UI tidak kembali normal. Cek: gnclibre logs"; return 1; }
+  brand_asset_ok "$logo" || { ui_msg "Gagal" "Logo tidak bisa diakses lewat Web UI (images/custom/$logo).\nDetail: $LOG"; return 1; }
+  ui_info "Menyimpan setting tampilan..."
+  lnms_c config:set title_image "images/custom/$logo" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set favicon "/images/custom/gnc-favicon.png" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set project_name "$title" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set page_title_suffix "$title" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set login_message "$msg" >>"$LOG" 2>&1 || ok=0
+  logf "Branding diterapkan (logo=$logo, judul=$title)"
+  if ((ok)); then
+    ui_msg "Berhasil" "Branding diterapkan:\n  Logo   : $logo\n  Judul  : $title\n  Pesan  : $msg\n\nMuat ulang halaman (Ctrl+Shift+R) untuk melihat hasilnya." 14
+  else
+    ui_msg "Sebagian gagal" "Sebagian setting gagal disimpan. Detail: $LOG"; return 1
+  fi
+}
+
+brand_reset() {
+  local ok=1
+  ui_info "Mengembalikan tampilan asli LibreNMS..."
+  lnms_c config:set title_image "" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set favicon "" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set project_name "LibreNMS" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set page_title_suffix "LibreNMS" >>"$LOG" 2>&1 || ok=0
+  lnms_c config:set login_message "$LNMS_MSG_DEFAULT" >>"$LOG" 2>&1 || ok=0
+  logf "Branding dikembalikan ke default LibreNMS"
+  if ((ok)); then ui_msg "Berhasil" "Tampilan kembali ke logo & judul asli LibreNMS."; else ui_msg "Sebagian gagal" "Detail: $LOG"; return 1; fi
+}
+
+brand_current() {
+  local k
+  for k in title_image favicon project_name page_title_suffix login_message; do
+    printf '%-18s: %s\n' "$k" "$(lnms_c config:get "$k" 2>/dev/null | tr -d '\r')"
+  done
+  echo; echo "Folder branding   : $BRD"; ls -l "$BRD" 2>/dev/null | awk 'NR>1 {print "  " $9 " (" $5 " byte)"}'
+}
+
+cfg_get() { lnms_c config:get "$1" 2>/dev/null | tr -d '\r'; }
+
+do_brand_title() {
+  local cur t
+  cur=$(cfg_get page_title_suffix)
+  ui_input t "Judul Halaman" "Judul di tab browser & alt logo (mis. 'Devices | GNC NMS'):" "${cur:-$BRAND_TITLE_DEFAULT}" valid_nonempty "Judul tidak boleh kosong." || return 0
+  if lnms_c config:set page_title_suffix "$t" >>"$LOG" 2>&1 && lnms_c config:set project_name "$t" >>"$LOG" 2>&1; then
+    ui_msg "Berhasil" "Judul halaman sekarang: $t"
+  else ui_msg "Gagal" "Detail: $LOG"; fi
+}
+
+do_brand_message() {
+  local cur m
+  cur=$(cfg_get login_message)
+  ui_input m "Pesan Login" "Pesan di bawah form login:" "${cur:-$BRAND_MSG_DEFAULT}" valid_nonempty "Pesan tidak boleh kosong." || return 0
+  if lnms_c config:set login_message "$m" >>"$LOG" 2>&1; then ui_msg "Berhasil" "Pesan login diperbarui."; else ui_msg "Gagal" "Detail: $LOG"; fi
+}
+
+valid_png_file() { [[ -f $1 && $(head -c 8 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n') == 89504e470d0a1a0a ]]; }
+
+do_brand_custom_logo() {
+  local f title
+  ui_input f "Logo Sendiri" "Path file logo PNG di server ini (mis. /root/logo-klien.png).\nSaran: horizontal, tinggi 120-240 px, latar putih/transparan.\nCopy dulu ke server, mis.: scp logo.png root@IP:/root/" "/root/" valid_png_file \
+    "File tidak ditemukan atau bukan PNG." || return 0
+  brand_write_assets "$BRD"
+  install -m 644 "$f" "$BRD/custom-logo.png"
+  title=$(cfg_get page_title_suffix)
+  [[ -z $title || $title == LibreNMS ]] && title=$BRAND_TITLE_DEFAULT
+  brand_apply custom-logo.png "$title" "$(cfg_get login_message)"
+}
+
+m_brand() {
+  local c
+  while true; do
+    c=$(ui_menu "Branding" "Tampilan Web UI (logo, favicon, judul, pesan login):" \
+      1 "Terapkan branding GNC (logo, favicon, judul, pesan)" 2 "Ubah judul halaman" 3 "Ubah pesan login" \
+      4 "Pakai logo sendiri (file PNG)" 5 "Lihat setting sekarang" 6 "Kembalikan tampilan asli LibreNMS" 0 "Kembali") || return 0
+    case $c in
+      1) brand_apply ;;
+      2) do_brand_title ;;
+      3) do_brand_message ;;
+      4) do_brand_custom_logo ;;
+      5) ui_run "Setting Branding" brand_current ;;
+      6) ui_yesno "Kembalikan" "Kembalikan logo, judul & pesan login ke bawaan LibreNMS?" no && brand_reset ;;
+      0) return 0 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Menu utama
 # ---------------------------------------------------------------------------
 main_menu() {
@@ -737,6 +1052,7 @@ main_menu() {
       6 "Zona waktu" \
       7 "Layanan (restart, log, update)" \
       8 "Backup & restore" \
+      9 "Branding (logo, judul, pesan login)" \
       0 "Keluar") || return 0
     case $c in
       1) ui_run "Status LibreNMS" status_text ;;
@@ -747,6 +1063,7 @@ main_menu() {
       6) m_tz ;;
       7) m_service ;;
       8) m_backup ;;
+      9) m_brand ;;
       0) return 0 ;;
     esac
   done
@@ -772,7 +1089,7 @@ main() {
   case $cmd in
     -h|--help|help) show_banner; usage; return 0 ;;
     -v|--version|version) echo "gnclibre $GNCLIBRE_VERSION"; return 0 ;;
-    menu|status|passwd|restart|update|backup|logs|validate|self-update) ;;
+    menu|status|passwd|restart|update|backup|logs|validate|self-update|branding) ;;
     *) usage; return 1 ;;
   esac
   need_root "$@"
@@ -789,6 +1106,8 @@ main() {
     backup)   say "Backup database..."; if f=$(backup_db); then okp "Backup: $f"; else die "Backup gagal (lihat $LOG)"; fi ;;
     logs)     dc logs -f --tail 100 "${2:-librenms}" ;;
     validate) dc exec -T --user librenms librenms php validate.php ;;
+    branding) if [[ ${2:-} == reset ]]; then brand_reset
+              else brand_apply "" "${GNC_BRAND_TITLE:-}" "${GNC_BRAND_MESSAGE:-}"; fi ;;
   esac
 }
 

@@ -42,7 +42,7 @@ Setelah selesai, buka `http://IP-PC` (atau `http://IP-PC:PORT` kalau port bukan 
 | Email admin | `admin@localhost` | dipakai juga sebagai sysContact |
 | Password database | generate otomatis | |
 | SNMP community | `public` | **disarankan diganti** |
-| Komponen tambahan | syslog ✓, trap ✓, monitor PC ini ✓, SMTP ✗, sysName duplikat ✓ | sysName duplikat perlu untuk banyak switch dengan hostname default (mis. Ruijie `ruijie`) |
+| Komponen tambahan | syslog ✓, trap ✓, monitor PC ini ✓, SMTP ✗, sysName duplikat ✓, branding GNC ✓ | sysName duplikat perlu untuk banyak switch dengan hostname default (mis. Ruijie `ruijie`) |
 | Lokasi (sysLocation) | `Kantor Klien` | |
 | Folder instalasi | `/opt/librenms` | |
 | PHP memory limit | `256M` | |
@@ -85,6 +85,7 @@ Menu yang tersedia:
 | Zona waktu | WIB / WITA / WIT / lainnya |
 | Layanan | restart, stop/start, lihat log, `validate.php`, update ke image terbaru (DB dibackup dulu) |
 | Backup & restore | backup database, backup lengkap (DB + grafik RRD + config), restore database |
+| Branding | terapkan logo/favicon/judul/pesan login GNC, ubah judul & pesan, pakai logo sendiri (PNG), kembalikan tampilan asli |
 
 Perintah langsung tanpa menu (bisa dipakai di script):
 
@@ -96,6 +97,8 @@ gnclibre update           # backup DB, lalu update LibreNMS
 gnclibre restart          # restart semua container
 gnclibre logs [service]   # ikuti log (default: librenms)
 gnclibre validate         # jalankan validate.php
+gnclibre branding         # terapkan branding GNC
+gnclibre branding reset   # kembalikan tampilan asli LibreNMS
 gnclibre self-update      # perbarui gnclibre dari repo ini
 ```
 
@@ -110,6 +113,21 @@ gnclibre
 ```
 
 Folder instalasi dideteksi otomatis dari container Docker. Kalau tidak terdeteksi, isi `LNMS_INSTALL_DIR=/path/folder` di `/etc/gnclibre.conf`.
+
+## Branding GNC
+
+Secara default installer memasang identitas GNC di Web UI:
+
+| Bagian | Isi |
+|---|---|
+| Logo navbar & halaman login | logo Galura Nexa Core (kartu putih, terbaca di tema terang/gelap) |
+| Favicon tab browser | ikon jaringan GNC |
+| Judul tab browser | `Devices \| GNC NMS` (bisa diganti) |
+| Pesan halaman login | "Sistem monitoring jaringan Galura Nexa Core. Akses hanya untuk pengguna yang berwenang." |
+
+File logo ada di `/opt/librenms/branding/` dan di-mount ke container lewat `compose.override.yml`, jadi logo tetap ada setelah update atau recreate container. File override ini otomatis dimuat saat `docker compose` dijalankan di folder instalasi.
+
+Server lama cukup menjalankan `gnclibre self-update`, lalu `gnclibre branding`. Logo milik klien bisa dipasang lewat menu `gnclibre` → Branding → Pakai logo sendiri.
 
 ## Akses lewat Cloudflare Tunnel
 
