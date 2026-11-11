@@ -26,7 +26,7 @@
 
 set -uo pipefail
 
-readonly GNCLIBRE_VERSION="1.2.0"
+readonly GNCLIBRE_VERSION="1.2.1"
 readonly CONF_FILE=${GNCLIBRE_CONF:-/etc/gnclibre.conf}
 readonly LOG=${GNCLIBRE_LOG:-/var/log/gnclibre.log}
 readonly BT="GNC LibreNMS Manager v${GNCLIBRE_VERSION}  |  Galura Nexa Core"
@@ -1100,12 +1100,15 @@ EOF
   telegraf:
     image: telegraf:latest
     container_name: librenms_telegraf
+    # Jalan sebagai root + NET_RAW agar ping (raw socket) berfungsi juga di LXC unprivileged
+    entrypoint: ["/usr/bin/telegraf"]
+    command: ["--config", "/etc/telegraf/telegraf.conf"]
+    cap_add:
+      - NET_RAW
     env_file:
       - "./telegraf.env"
     environment:
       TZ: "${tz}"
-    sysctls:
-      net.ipv4.ping_group_range: "0 2147483647"
     volumes:
       - "./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro"
     depends_on:
@@ -1142,8 +1145,16 @@ EOF
 }
 
 stack_up() { # recreate service yang berubah, hapus container modul yang dinonaktifkan
+  local out rc err
   ui_info "Menerapkan perubahan container (download image pertama kali bisa beberapa menit)..."
-  dc up -d --remove-orphans >>"$LOG" 2>&1 && wait_web
+  out=$(dc up -d --remove-orphans 2>&1); rc=$?
+  printf '%s\n' "$out" >>"$LOG"
+  if ((rc != 0)); then
+    err=$(printf '%s\n' "$out" | grep -iE 'error|fail|denied|conflict' | tail -n 3 | cut -c1-220)
+    ui_msg "Container gagal dijalankan" "Pesan dari Docker:\n\n${err:-$(printf '%s\n' "$out" | tail -n 3)}\n\nLog lengkap: $LOG" 18
+    return 1
+  fi
+  wait_web || { ui_msg "Gagal" "Web UI LibreNMS tidak merespons setelah perubahan. Cek: gnclibre logs"; return 1; }
 }
 
 # ---- Token API LibreNMS (Sanctum di 26.x, tabel api_tokens di versi lama) ----
@@ -1318,7 +1329,7 @@ oxi_enable() {
   oxi_write_config "$tok"
   genv_set GNC_MOD_OXIDIZED yes
   write_override || return 1
-  stack_up || { ui_msg "Gagal" "Container tidak berjalan normal. Cek: gnclibre logs oxidized"; return 1; }
+  stack_up || return 1
   ui_info "Mengaktifkan integrasi Oxidized di LibreNMS..."
   lnms_c config:set oxidized.enabled true >>"$LOG" 2>&1
   lnms_c config:set oxidized.url "http://oxidized:8888" >>"$LOG" 2>&1
@@ -1373,7 +1384,7 @@ EOF
 [[inputs.ping]]
   urls = [${urls}]
   method = "native"
-  privileged = false
+  privileged = true
   count = 10
   ping_interval = "1s"
   deadline = "15s"
@@ -3481,7 +3492,7 @@ an_enable() {
   genv_set GNC_MOD_ANALYTICS yes
   write_override || return 1
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then ufw allow "$gp/tcp" >>"$LOG" 2>&1; fi
-  stack_up || { ui_msg "Gagal" "Container tidak berjalan normal. Cek: gnclibre logs influxdb"; return 1; }
+  stack_up || return 1
   dc restart telegraf >>"$LOG" 2>&1            # baca ulang telegraf.conf bila target berubah
   ui_info "Menunggu InfluxDB siap..."
   wait_for influx_ok 90 || { ui_msg "Gagal" "InfluxDB belum siap. Cek: gnclibre logs influxdb"; return 1; }
